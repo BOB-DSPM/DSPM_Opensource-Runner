@@ -1,0 +1,31 @@
+total 4194476
+drwxr-xr-x  24 root root       4096 Aug 13 10:52 .
+drwxr-xr-x  24 root root       4096 Aug 13 10:52 ..
+lrwxrwxrwx   1 root root          7 Apr 22  2024 bin -> usr/bin
+drwxr-xr-x   2 root root       4096 Feb 26  2024 bin.usr-is-merged
+drwxr-xr-x   4 root root       4096 Oct  3 10:45 boot
+dr-xr-xr-x   2 root root       4096 Aug  6 03:17 cdrom
+drwxr-xr-x  23 root root       6180 Nov  1 15:50 dev
+drwxr-xr-x 168 root root      12288 Oct 24 13:23 etc
+drwxr-xr-x   3 root root       4096 Aug 11 02:11 home
+lrwxrwxrwx   1 root root          7 Apr 22  2024 lib -> usr/lib
+lrwxrwxrwx   1 root root          9 Aug 11 13:44 lib32 -> usr/lib32
+lrwxrwxrwx   1 root root          9 Apr 22  2024 lib64 -> usr/lib64
+drwxr-xr-x   2 root root       4096 Apr  8  2024 lib.usr-is-merged
+drwx------   2 root root      16384 Aug 11 02:08 lost+found
+drwxr-xr-x   3 root root       4096 Oct 10 17:55 media
+drwxr-xr-x   2 root root       4096 Aug  6 01:48 mnt
+drwxr-xr-x   8 root root       4096 Oct  8 19:35 opt
+dr-xr-xr-x 617 root root          0 Nov  1 14:23 proc
+drwx------  10 root root       4096 Oct 24 12:57 root
+drwxr-xr-x  47 root root       1260 Nov  1 14:25 run
+lrwxrwxrwx   1 root root          8 Apr 22  2024 sbin -> usr/sbin
+drwxr-xr-x   2 root root       4096 Mar 31  2024 sbin.usr-is-merged
+drwxr-xr-x  52 root root       4096 Oct 27 18:23 snap
+drwxr-xr-x   2 root root       4096 Aug  6 01:48 srv
+-rw-------   1 root root 4294967296 Aug 11 02:10 swap.img
+dr-xr-xr-x  13 root root          0 Nov  1 14:23 sys
+drwxr-xr-x   4 root root       4096 Aug 13 10:52 System
+drwxrwxrwt  32 root root      69632 Nov  1 20:15 tmp
+drwxr-xr-x  16 root root       4096 Aug 13 14:08 usr
+drwxr-xr-x  14 root root       4096 Jul  2 23:04 var
