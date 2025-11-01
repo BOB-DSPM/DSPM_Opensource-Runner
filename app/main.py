@@ -1,21 +1,6 @@
-# app/main.py
-from __future__ import annotations
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from app.routers import health, oss
 
-from app.core.config import settings
-from app.routers import api_router
-
-def create_app() -> FastAPI:
-    app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION)
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[o.strip() for o in settings.ALLOW_ORIGINS.split(",")],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-    app.include_router(api_router)
-    return app
-
-app = create_app()
+app = FastAPI(title="SAGE OSS API", version="0.1.0")
+app.include_router(health.router, prefix="/health", tags=["health"])
+app.include_router(oss.router, prefix="/oss", tags=["oss"])
