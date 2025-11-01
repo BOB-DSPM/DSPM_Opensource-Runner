@@ -1,0 +1,52 @@
+# --- Python 기본 ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# --- 가상환경 ---
+.venv/
+venv/
+
+# --- 환경변수/시크릿 ---
+.env
+.env.*
+!.env.example
+
+# --- 로그 & 런타임 산출물 ---
+logs/
+.runs/
+*.log
+
+# --- 테스트/커버리지 ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --- 패키징 산출물 ---
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- 타입체커/린터 캐시 ---
+.mypy_cache/
+.pyrightcache/
+.pyre/
+.ruff_cache/
+
+# --- IDE / 편집기 ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS 잡파일 ---
+.DS_Store
+Thumbs.db
+
+# --- 기타 캐시 ---
+.cache/
