@@ -19,7 +19,7 @@ ALLOWED_ORIGINS = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],   # ["GET","POST","OPTIONS"] 등으로 제한 가능
     allow_headers=["*"],
