@@ -1,15 +1,17 @@
 # app/routers/oss.py
 from __future__ import annotations
-
 from typing import Any, Dict, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
+
 from ..services import (
     get_catalog as svc_get_catalog,
     get_detail as svc_get_detail,
     simulate_use as svc_simulate_use,
 )
-# ✅ 실행용
 from ..services.oss_service import run_tool as svc_run_tool
+# ✅ 스트리밍
+from ..services.oss_service import iter_run_stream as svc_iter_run_stream
 
 router = APIRouter(prefix="/api/oss", tags=["oss"])
 
@@ -31,10 +33,17 @@ def simulate_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=data.get("error", 400), detail=data.get("message", "Unknown error"))
     return data
 
-# ✅ 실제 실행
 @router.post("/{code}/run", summary="오픈소스 실행 (실제 커맨드 실행 후 결과 반환)")
 def run_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     data = svc_run_tool(code, payload or {})
     if "error" in data:
         raise HTTPException(status_code=data.get("error", 400), detail=data.get("message", "Unknown error"))
     return data
+
+# ✅ 실시간 로그 스트리밍(텍스트 스트림)
+@router.post("/{code}/run/stream", summary="오픈소스 실행 (실시간 스트림)")
+async def run_stream(code: str, request: Request) -> StreamingResponse:
+    payload = await request.json()
+    gen = svc_iter_run_stream(code, payload or {})
+    # text/plain 으로 chunked 전송
+    return StreamingResponse(gen, media_type="text/plain; charset=utf-8")

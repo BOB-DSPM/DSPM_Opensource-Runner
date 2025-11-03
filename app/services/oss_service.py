@@ -8,6 +8,8 @@ import sys
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+import asyncio
+import json
 
 from ..utils.loader import list_items, get_item_by_code, merge
 
@@ -462,3 +464,118 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
         "preinstall": preinstall_info,  # ⬅ 설치 전/후 확인 및 pip 로그 포함
     }
+
+async def _aiter_stream_popen(cmd: list[str], cwd: str | None = None, env: dict | None = None, timeout: int | None = None):
+    """
+    asyncio 기반으로 프로세스 stdout/stderr를 실시간으로 합쳐 흘려보냄.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        cwd=cwd,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        start = time.time()
+        # 라인 단위로 push
+        assert proc.stdout is not None
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            yield line  # bytes
+            if timeout and (time.time() - start) > timeout:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                yield f"\n[ERROR] Timeout after {timeout} sec\n".encode()
+                break
+        rc = await proc.wait()
+        yield f"\n[RC] {rc}\n".encode()
+    except Exception as e:
+        yield f"\n[ERROR] {e}\n".encode()
+
+async def iter_run_stream(code: str, payload: Dict[str, Any]):
+    """
+    설치(pip) → 존재확인 → prowler 실행을 순차로 스트리밍.
+    마지막에 생성 파일 목록도 JSON 한 번 출력.
+    """
+    # 기본 검증/경로 준비는 기존 run_tool 과 동일
+    item = get_item_by_code(code)
+    if not item:
+        yield b'{"error":404,"message":"item not found"}\n'
+        return
+    if code != "prowler":
+        yield b'{"error":400,"message":"only prowler supported"}\n'
+        return
+
+    # 실행 디렉토리/출력 디렉토리 확보
+    base_run_dir = _safe_run_dir("./runs")
+    user_out = payload.get("output")
+    out_dir = _sanitize_subdir(base_run_dir, user_out)
+
+    # payload 보정
+    payload = dict(payload or {})
+    payload["output"] = out_dir
+
+    # 타임아웃
+    try:
+        timeout_sec = int(str(payload.get("timeout_sec", "600")))
+    except ValueError:
+        timeout_sec = 600
+
+    # pip 설치 여부
+    pip_install_flag = str(payload.get("pip_install", "true")).lower() == "true"
+    pip_index_url = payload.get("pip_index_url") or None
+    pip_extra_args = payload.get("pip_extra_args") or None
+
+    # 프로파일 환경
+    env = os.environ.copy()
+    profile = payload.get("profile")
+    if profile and payload.get("provider", "aws") == "aws":
+        env["AWS_PROFILE"] = str(profile)
+
+    # 1) pip install (옵션)
+    if pip_install_flag:
+        yield b"===== [STEP] pip install prowler =====\n"
+        args = [sys.executable, "-m", "pip", "install", "prowler"]
+        if pip_index_url:
+            args += ["--index-url", str(pip_index_url)]
+        if pip_extra_args:
+            args += shlex.split(pip_extra_args)
+        async for chunk in _aiter_stream_popen(args, env=env, timeout=900):
+            yield chunk
+
+    # 2) prowler -v 확인
+    yield b"\n===== [STEP] check prowler =====\n"
+    async for chunk in _aiter_stream_popen(["prowler", "-v"], env=env, timeout=60):
+        yield chunk
+
+    # 3) prowler 실행
+    try:
+        args = _build_prowler_args(payload)
+    except Exception as e:
+        yield f'\n{{"error":400,"message":"Invalid options: {e}"}}\n'.encode()
+        return
+
+    yield b"\n===== [STEP] run prowler =====\n"
+    yield f"$ {' '.join(shlex.quote(x) for x in args)}\n".encode()
+    start_ts = time.time()
+    async for chunk in _aiter_stream_popen(args, cwd=base_run_dir, env=env, timeout=timeout_sec):
+        yield chunk
+    duration_ms = int((time.time() - start_ts) * 1000)
+
+    # 4) 생성 파일 목록 요약 JSON
+    files = _list_files_under(out_dir)
+    tail = {
+        "summary": {
+            "run_dir": os.path.relpath(base_run_dir, os.getcwd()),
+            "output_dir": os.path.relpath(out_dir, os.getcwd()),
+            "duration_ms": duration_ms,
+            "files": files,
+        }
+    }
+    yield b"\n===== [STEP] summary =====\n"
+    yield (json.dumps(tail, ensure_ascii=False) + "\n").encode()
