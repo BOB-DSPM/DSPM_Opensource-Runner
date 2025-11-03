@@ -3,7 +3,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Query
-from ..services import get_catalog as svc_get_catalog, get_detail as svc_get_detail, simulate_use as svc_simulate_use
+from ..services import (
+    get_catalog as svc_get_catalog,
+    get_detail as svc_get_detail,
+    simulate_use as svc_simulate_use,
+)
+# ✅ 실행용
+from ..services.oss_service import run_tool as svc_run_tool
 
 router = APIRouter(prefix="/api/oss", tags=["oss"])
 
@@ -21,6 +27,14 @@ def get_detail(code: str) -> Dict[str, Any]:
 @router.post("/{code}/use", summary="오픈소스 '사용하기' 시뮬레이션 (명령만 생성)")
 def simulate_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     data = svc_simulate_use(code, payload or {})
+    if "error" in data:
+        raise HTTPException(status_code=data.get("error", 400), detail=data.get("message", "Unknown error"))
+    return data
+
+# ✅ 실제 실행
+@router.post("/{code}/run", summary="오픈소스 실행 (실제 커맨드 실행 후 결과 반환)")
+def run_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = svc_run_tool(code, payload or {})
     if "error" in data:
         raise HTTPException(status_code=data.get("error", 400), detail=data.get("message", "Unknown error"))
     return data
