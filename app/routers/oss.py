@@ -1,24 +1,26 @@
-from fastapi import APIRouter, Query, HTTPException
-from typing import List, Optional
-from app.utils.loader import load_catalog
+# app/routers/oss.py
+from __future__ import annotations
 
-router = APIRouter()
+from typing import Any, Dict, Optional
+from fastapi import APIRouter, HTTPException, Query
+from ..services import get_catalog as svc_get_catalog, get_detail as svc_get_detail, simulate_use as svc_simulate_use
 
-@router.get("", summary="오픈소스 목록 조회")
-def list_oss(tag: Optional[str] = Query(None), q: Optional[str] = Query(None)):
-    data = load_catalog()
-    items = data["items"]
-    if tag:
-        items = [x for x in items if tag in x.get("tags", [])]
-    if q:
-        ql = q.lower()
-        items = [x for x in items if ql in x["name"].lower() or ql in x.get("desc","").lower()]
-    return {"count": len(items), "items": items}
+router = APIRouter(prefix="/api/oss", tags=["oss"])
 
-@router.get("/{code}", summary="오픈소스 단건 조회")
-def get_oss(code: str):
-    data = load_catalog()
-    for x in data["items"]:
-        if x["code"] == code:
-            return x
-    raise HTTPException(status_code=404, detail="not found")
+@router.get("", summary="오픈소스 카탈로그 조회")
+def get_catalog(q: Optional[str] = Query(None, description="검색어 (선택)")) -> Dict[str, Any]:
+    return svc_get_catalog(q)
+
+@router.get("/{code}", summary="오픈소스 상세 정보(정적)")
+def get_detail(code: str) -> Dict[str, Any]:
+    data = svc_get_detail(code)
+    if "error" in data:
+        raise HTTPException(status_code=data.get("error", 400), detail=data.get("message", "Unknown error"))
+    return data
+
+@router.post("/{code}/use", summary="오픈소스 '사용하기' 시뮬레이션 (명령만 생성)")
+def simulate_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = svc_simulate_use(code, payload or {})
+    if "error" in data:
+        raise HTTPException(status_code=data.get("error", 400), detail=data.get("message", "Unknown error"))
+    return data

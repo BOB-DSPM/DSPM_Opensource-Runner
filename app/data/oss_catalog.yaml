@@ -2,35 +2,7 @@ items:
   - code: prowler
     name: "Prowler"
     category: "cloud-security"
-    tags: ["aws","security","audit","cli"]
+    tags: ["aws", "security", "audit", "cli"]
     homepage: "https://github.com/prowler-cloud/prowler"
-    desc: "AWS 등 클라우드 보안 점검 CLI"
-    license: "Apache-2.0"
-  - code: steampipe
-    name: "Steampipe"
-    category: "cloud-inventory"
-    tags: ["aws","inventory","sql"]
-    homepage: "https://github.com/turbot/steampipe"
-    desc: "클라우드 인벤토리를 SQL처럼 조회"
-    license: "AGPL-3.0"
-  - code: trivy
-    name: "Trivy"
-    category: "vulnerability"
-    tags: ["image","fs","iac","scan"]
-    homepage: "https://github.com/aquasecurity/trivy"
-    desc: "컨테이너/파일시스템/코드 취약점 스캐너"
-    license: "Apache-2.0"
-  - code: wazuh
-    name: "Wazuh"
-    category: "siem-edr"
-    tags: ["siem","edr","agent"]
-    homepage: "https://github.com/wazuh/wazuh"
-    desc: "오픈소스 SIEM/EDR 플랫폼"
-    license: "GPL-2.0"
-  - code: opensearch
-    name: "OpenSearch"
-    category: "search-analytics"
-    tags: ["search","analytics","dashboards"]
-    homepage: "https://github.com/opensearch-project/OpenSearch"
-    desc: "검색·로그 분석 엔진 및 대시보드"
+    desc: "AWS 등 여러 클라우드 환경에 대한 보안 점검 자동화 CLI 도구"
     license: "Apache-2.0"
