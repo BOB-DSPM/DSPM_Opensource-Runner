@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+import json  # ⬅ 추가
 
 from ..services import (
     get_catalog as svc_get_catalog,
@@ -10,7 +11,6 @@ from ..services import (
     simulate_use as svc_simulate_use,
 )
 from ..services.oss_service import run_tool as svc_run_tool
-# ✅ 스트리밍
 from ..services.oss_service import iter_run_stream as svc_iter_run_stream
 
 router = APIRouter(prefix="/api/oss", tags=["oss"])
@@ -43,7 +43,24 @@ def run_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 # ✅ 실시간 로그 스트리밍(텍스트 스트림)
 @router.post("/{code}/run/stream", summary="오픈소스 실행 (실시간 스트림)")
 async def run_stream(code: str, request: Request) -> StreamingResponse:
-    payload = await request.json()
+    # ⚠️ 빈 바디/비-JSON도 안전 처리
+    payload: Dict[str, Any] = {}
+    try:
+        ct = (request.headers.get("content-type") or "").lower()
+        if "application/json" in ct:
+            raw = await request.body()
+            if raw and raw.strip():
+                payload = json.loads(raw.decode("utf-8"))
+        elif "application/x-www-form-urlencoded" in ct or "multipart/form-data" in ct:
+            form = await request.form()
+            # FormData -> dict로 단순 변환 (필요 시 키 필터링)
+            payload = {k: v for k, v in form.items()}
+        else:
+            # 바디 비어있거나 Content-Type 없는 경우: 기본값 사용
+            payload = {}
+    except Exception:
+        # 파싱 실패해도 스트림은 계속 진행 (옵션 기본값으로 실행)
+        payload = {}
+
     gen = svc_iter_run_stream(code, payload or {})
-    # text/plain 으로 chunked 전송
     return StreamingResponse(gen, media_type="text/plain; charset=utf-8")
