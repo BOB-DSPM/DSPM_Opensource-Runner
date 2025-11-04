@@ -7,168 +7,13 @@ import subprocess
 import sys
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 import asyncio
 import json
 
 from ..utils.loader import list_items, get_item_by_code, merge
 
-# ---------- 내부 헬퍼 ----------
-
-def _prowler_detail(base: Dict[str, Any]) -> Dict[str, Any]:
-    """prowler 세부 정보 템플릿(정적)."""
-    defaults = {
-        "code": "prowler",
-        "name": "Prowler",
-        "category": "cloud-security",
-        "tags": ["aws", "security", "audit", "cli"],
-        "homepage": "https://github.com/prowler-cloud/prowler",
-        "desc": "AWS 등 클라우드 보안 점검 CLI",
-        "license": "Apache-2.0",
-    }
-    meta = merge(defaults, base or {})
-
-    options: List[Dict[str, Any]] = [
-        {
-            "key": "provider",
-            "label": "Provider",
-            "type": "enum",
-            "values": ["aws", "azure", "gcp", "kubernetes", "github", "m365", "oci", "nhn"],
-            "required": True,
-            "default": "aws",
-            "help": "기본 진단 대상 클라우드/플랫폼",
-        },
-        {
-            "key": "profile",
-            "label": "AWS CLI Profile",
-            "type": "string",
-            "required": False,
-            "placeholder": "default",
-            "help": "AWS 접근 시 사용할 프로파일 (예: default)",
-            "visible_if": {"provider": "aws"},
-        },
-        {
-            "key": "region",
-            "label": "AWS Region",
-            "type": "string",
-            "required": False,
-            "placeholder": "ap-northeast-2",
-            "help": "AWS 리전 제한이 필요할 때 지정",
-            "visible_if": {"provider": "aws"},
-        },
-        {
-            "key": "list",
-            "label": "List Mode",
-            "type": "enum",
-            "values": ["checks", "services", "compliance", "categories"],
-            "required": False,
-            "help": "목록 출력 모드(--list-<mode>)",
-        },
-        {
-            "key": "services",
-            "label": "Services",
-            "type": "array[string]",
-            "required": False,
-            "help": "특정 서비스만 점검 (예: s3, rds)",
-        },
-        {
-            "key": "checks",
-            "label": "Checks",
-            "type": "array[string]",
-            "required": False,
-            "help": "특정 체크 ID만 실행",
-        },
-        {
-            "key": "compliance",
-            "label": "Compliance Frameworks",
-            "type": "array[string]",
-            "required": False,
-            "help": "특정 규정 프레임워크만 실행 (예: cis_1.4, nist_csf 등)",
-        },
-        {
-            "key": "severity",
-            "label": "Severity",
-            "type": "enum",
-            "values": ["informational", "low", "medium", "high", "critical"],
-            "required": False,
-            "help": "심각도 필터",
-        },
-        {
-            "key": "format",
-            "label": "Output Format",
-            "type": "enum",
-            "values": ["json", "csv", "html", "json-asff"],
-            "required": False,
-            "default": "json",
-        },
-        {
-            "key": "output",
-            "label": "Output Path (dir)",
-            "type": "string",
-            "required": False,
-            "placeholder": "./outputs",
-            "help": "결과 저장 디렉토리. 서버 내부에서 안전 경로로 보정됨.",
-        },
-        # ----- ⬇ pip-install 관련 옵션(신규) -----
-        {
-            "key": "pip_install",
-            "label": "Auto pip install prowler",
-            "type": "enum",
-            "values": ["true", "false"],
-            "required": False,
-            "default": "true",
-            "help": "실행 전 prowler가 없으면 pip로 자동 설치",
-        },
-        {
-            "key": "pip_index_url",
-            "label": "Pip Index URL",
-            "type": "string",
-            "required": False,
-            "placeholder": "https://pypi.org/simple",
-            "help": "사설/미러 인덱스 URL이 있을 경우",
-        },
-        {
-            "key": "pip_extra_args",
-            "label": "Pip Extra Args",
-            "type": "string",
-            "required": False,
-            "placeholder": "--no-cache-dir -U",
-            "help": "추가 pip 인자(예: 업그레이드/캐시 끄기 등)",
-        },
-        {
-            "key": "timeout_sec",
-            "label": "Timeout (sec)",
-            "type": "string",
-            "required": False,
-            "placeholder": "600",
-            "help": "최대 실행 시간(초). 기본 600.",
-        },
-    ]
-
-    cli_examples: List[str] = [
-        "prowler -v",
-        "prowler aws",
-        "prowler aws --profile default --regions ap-northeast-2",
-        "prowler aws --services s3,rds",
-        "prowler aws --list-checks",
-        "prowler aws --list-services",
-        "prowler aws --list-compliance",
-        "prowler aws --list-categories",
-        "prowler aws --output json --output-directory ./outputs",
-        "prowler aws --compliance cis_1.4",
-    ]
-
-    return {
-        **meta,
-        "detail": {
-            "about": "Prowler는 멀티클라우드 보안 점검 CLI입니다.",
-            "options": options,
-            "cli_examples": cli_examples,
-            "use_endpoint": "/api/oss/prowler/use",
-            "run_endpoint": "/api/oss/prowler/run",
-            "disclaimer": "※ 커맨드 실행은 서버에서 수행됩니다. 신뢰된 옵션만 허용됩니다.",
-        },
-    }
+# ---------- 내부 헬퍼 (공통) ----------
 
 def _join_csv(v: Any) -> Optional[str]:
     if v is None:
@@ -176,48 +21,6 @@ def _join_csv(v: Any) -> Optional[str]:
     if isinstance(v, list):
         return ",".join(str(x) for x in v if str(x).strip())
     return str(v)
-
-def _build_prowler_args(payload: Dict[str, Any]) -> List[str]:
-    """실행용 인자 리스트(쉘이 아닌 직접 인자) 구성."""
-    provider = str(payload.get("provider", "aws")).strip()
-    if provider not in {"aws", "azure", "gcp", "kubernetes", "github", "m365", "oci", "nhn"}:
-        raise ValueError(f"Unsupported provider: {provider}")
-
-    args: List[str] = ["prowler", provider]
-
-    list_mode = payload.get("list")
-    if list_mode in {"checks", "services", "compliance", "categories"}:
-        args.append(f"--list-{list_mode}")
-
-    region = payload.get("region")
-    if region and provider == "aws":
-        args += ["--regions", str(region)]
-
-    services = _join_csv(payload.get("services"))
-    if services:
-        args += ["--services", services]
-
-    checks = _join_csv(payload.get("checks"))
-    if checks:
-        args += ["--checks", checks]
-
-    compliance = _join_csv(payload.get("compliance"))
-    if compliance:
-        args += ["--compliance", compliance]
-
-    severity = payload.get("severity")
-    if severity:
-        args += ["--severity", str(severity)]
-
-    out_fmt = payload.get("format")
-    if out_fmt:
-        args += ["--output", str(out_fmt)]
-
-    out_path = payload.get("output")
-    if out_path:
-        args += ["--output-directory", str(out_path)]
-
-    return args
 
 def _safe_run_dir(base_dir: str = "./runs") -> str:
     ts = time.strftime("%Y%m")
@@ -256,201 +59,442 @@ def _list_files_under(path: str, max_items: int = 200) -> List[Dict[str, Any]]:
         pass
     return items
 
-def _build_prowler_command(payload: Dict[str, Any]) -> str:
-    return " ".join(shlex.quote(x) for x in _build_prowler_args(payload))
+def _clip(s: str, limit: int = 200_000) -> str:
+    if len(s) > limit:
+        return s[:limit] + f"\n...[truncated {len(s)-limit} bytes]"
+    return s
 
-# ---------- pip 설치/검증 헬퍼 ----------
+# ---------- 바이너리 존재 확인 / 설치 (범용) ----------
 
-def _pip_install_prowler(index_url: Optional[str] = None, extra_args: Optional[str] = None, timeout: int = 600) -> Dict[str, Any]:
-    """
-    sys.executable -m pip install prowler [--index-url ...] [extra_args...]
-    """
-    args = [sys.executable, "-m", "pip", "install", "prowler"]
-    if index_url:
-        args += ["--index-url", str(index_url)]
-    if extra_args:
-        # 사용자가 공백으로 나눈 추가 인자 제공 가능
-        args += shlex.split(extra_args)
-
-    started = time.time()
+def _check_bin_exists(bin_name: str) -> Dict[str, Any]:
     try:
-        res = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
-        rc = res.returncode
-        stdout = res.stdout or ""
-        stderr = res.stderr or ""
-    except subprocess.TimeoutExpired as te:
-        rc = -1
-        stdout = te.stdout or ""
-        stderr = (te.stderr or "") + f"\n[ERROR] pip install timeout after {timeout} sec"
-    except Exception as e:
-        rc = 1
-        stdout = ""
-        stderr = f"[ERROR] pip install failed: {e}"
-    duration_ms = int((time.time() - started) * 1000)
-
-    return {
-        "cmd": " ".join(shlex.quote(x) for x in args),
-        "rc": rc,
-        "duration_ms": duration_ms,
-        "stdout": stdout,
-        "stderr": stderr,
-    }
-
-def _check_prowler_exists() -> Dict[str, Any]:
-    """prowler -v 로 존재 확인"""
-    try:
-        res = subprocess.run(["prowler", "-v"], capture_output=True, text=True, timeout=30)
-        return {"exists": res.returncode == 0, "rc": res.returncode, "stdout": res.stdout, "stderr": res.stderr}
+        res = subprocess.run([bin_name, "--version"], capture_output=True, text=True, timeout=30)
+        # 일부 도구는 -v 또는 명령이 다름 → 실패하더라도 FileNotFound 만 분기하면 충분
+        exists = (res.returncode == 0) or bool(res.stdout or res.stderr)
+        return {"exists": exists, "rc": res.returncode, "stdout": res.stdout, "stderr": res.stderr}
     except FileNotFoundError:
         return {"exists": False, "rc": 127, "stdout": "", "stderr": "FileNotFoundError"}
     except Exception as e:
         return {"exists": False, "rc": 1, "stdout": "", "stderr": str(e)}
 
-def ensure_prowler(pip_install: bool, index_url: Optional[str], extra_args: Optional[str]) -> Dict[str, Any]:
-    """
-    prowler 바이너리 확인 후, 없으면 pip install (선택).
-    반환: {checked_before, installed(여부), check_after, pip_log(선택)}
-    """
-    pre = _check_prowler_exists()
-    installed = False
-    pip_log = None
+def _pip_install(pkg: str, index_url: Optional[str], extra_args: Optional[str], timeout: int = 900) -> Dict[str, Any]:
+    args = [sys.executable, "-m", "pip", "install", pkg]
+    if index_url:
+        args += ["--index-url", str(index_url)]
+    if extra_args:
+        args += shlex.split(extra_args)
+    started = time.time()
+    try:
+        res = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        rc = res.returncode
+        stdout, stderr = res.stdout or "", res.stderr or ""
+    except subprocess.TimeoutExpired as te:
+        rc = -1
+        stdout = te.stdout or ""
+        stderr = (te.stderr or "") + f"\n[ERROR] pip install timeout after {timeout} sec"
+    except Exception as e:
+        rc, stdout, stderr = 1, "", f"[ERROR] pip install failed: {e}"
+    duration_ms = int((time.time() - started) * 1000)
+    return {"cmd": " ".join(shlex.quote(x) for x in args), "rc": rc, "duration_ms": duration_ms, "stdout": stdout, "stderr": stderr}
 
-    if not pre.get("exists", False) and pip_install:
-        pip_log = _pip_install_prowler(index_url=index_url, extra_args=extra_args, timeout=900)
-        post = _check_prowler_exists()
+def ensure_tool(bin_name: str, pip_pkg: Optional[str], pip_install: bool, index_url: Optional[str], extra_args: Optional[str]) -> Dict[str, Any]:
+    pre = _check_bin_exists(bin_name)
+    installed, pip_log = False, None
+    if not pre.get("exists", False) and pip_install and pip_pkg:
+        pip_log = _pip_install(pip_pkg, index_url, extra_args, timeout=900)
+        post = _check_bin_exists(bin_name)
         installed = bool(post.get("exists", False))
         return {"checked_before": pre, "installed": installed, "check_after": post, "pip_log": pip_log}
-
-    # 이미 있음 혹은 pip_install=False
     return {"checked_before": pre, "installed": False, "check_after": pre, "pip_log": pip_log}
 
-# ---------- 서비스 API(시뮬레이트) ----------
+# ---------- detail (옵션 스키마) ----------
+
+def _detail_template(defaults: Dict[str, Any], options: List[Dict[str, Any]], cli_examples: List[str], run_endpoint_code: str) -> Dict[str, Any]:
+    meta = defaults
+    return {
+        **meta,
+        "detail": {
+            "about": meta.get("desc") or "",
+            "options": options,
+            "cli_examples": cli_examples,
+            "use_endpoint": f"/api/oss/{run_endpoint_code}/use",
+            "run_endpoint": f"/api/oss/{run_endpoint_code}/run",
+            "disclaimer": "※ 커맨드 실행은 서버에서 수행됩니다. 신뢰된 옵션만 허용됩니다.",
+        },
+    }
+
+# ----- Prowler (기존) -----
+def _prowler_detail(base: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = merge({
+        "code": "prowler",
+        "name": "Prowler",
+        "category": "cloud-security",
+        "tags": ["aws", "security", "audit", "cli"],
+        "homepage": "https://github.com/prowler-cloud/prowler",
+        "desc": "AWS 등 클라우드 보안 점검 CLI",
+        "license": "Apache-2.0",
+    }, base or {})
+    options = [
+        {"key":"provider","label":"Provider","type":"enum","values":["aws","azure","gcp","kubernetes","github","m365","oci","nhn"],"required":True,"default":"aws"},
+        {"key":"profile","label":"AWS CLI Profile","type":"string","required":False,"placeholder":"default","visible_if":{"provider":"aws"}},
+        {"key":"region","label":"AWS Region","type":"string","required":False,"placeholder":"ap-northeast-2","visible_if":{"provider":"aws"}},
+        {"key":"list","label":"List Mode","type":"enum","values":["checks","services","compliance","categories"],"required":False},
+        {"key":"services","label":"Services","type":"array[string]","required":False},
+        {"key":"checks","label":"Checks","type":"array[string]","required":False},
+        {"key":"compliance","label":"Compliance Frameworks","type":"array[string]","required":False},
+        {"key":"severity","label":"Severity","type":"enum","values":["informational","low","medium","high","critical"],"required":False},
+        {"key":"format","label":"Output Format","type":"enum","values":["json","csv","html","json-asff"],"required":False,"default":"json"},
+        {"key":"output","label":"Output Path (dir)","type":"string","required":False,"placeholder":"./outputs"},
+        {"key":"pip_install","label":"Auto pip install","type":"enum","values":["true","false"],"required":False,"default":"true"},
+        {"key":"pip_index_url","label":"Pip Index URL","type":"string","required":False},
+        {"key":"pip_extra_args","label":"Pip Extra Args","type":"string","required":False,"placeholder":"--no-cache-dir -U"},
+        {"key":"timeout_sec","label":"Timeout (sec)","type":"string","required":False,"placeholder":"600"},
+    ]
+    cli_examples = [
+        "prowler -v",
+        "prowler aws --regions ap-northeast-2",
+        "prowler aws --list-checks",
+        "prowler aws --output json --output-directory ./outputs",
+    ]
+    return _detail_template(defaults, options, cli_examples, "prowler")
+
+def _build_prowler_args(payload: Dict[str, Any]) -> List[str]:
+    provider = str(payload.get("provider", "aws")).strip()
+    if provider not in {"aws","azure","gcp","kubernetes","github","m365","oci","nhn"}:
+        raise ValueError(f"Unsupported provider: {provider}")
+    args: List[str] = ["prowler", provider]
+    if (m := payload.get("list")) in {"checks","services","compliance","categories"}:
+        args += [f"--list-{m}"]
+    if provider == "aws" and (r := payload.get("region")):
+        args += ["--regions", str(r)]
+    if (sv := _join_csv(payload.get("services"))): args += ["--services", sv]
+    if (ck := _join_csv(payload.get("checks"))):   args += ["--checks", ck]
+    if (cp := _join_csv(payload.get("compliance"))): args += ["--compliance", cp]
+    if (sev := payload.get("severity")): args += ["--severity", str(sev)]
+    if (fmt := payload.get("format")):   args += ["--output", str(fmt)]
+    if (out := payload.get("output")):   args += ["--output-directory", str(out)]
+    return args
+
+# ----- Checkov -----
+def _checkov_detail(base: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = merge({
+        "code": "checkov",
+        "name": "Checkov",
+        "category": "iac-security",
+        "tags": ["terraform","cloudformation","kubernetes","helm","iac","sast"],
+        "homepage": "https://github.com/bridgecrewio/checkov",
+        "desc": "IaC 정적 분석(SAST)으로 보안/컴플라이언스 위반을 탐지",
+        "license": "Apache-2.0",
+    }, base or {})
+    options = [
+        {"key":"directory","label":"Target Directory","type":"string","required":True,"placeholder":"./iac"},
+        {"key":"framework","label":"Framework","type":"enum","values":["terraform","cloudformation","kubernetes","helm","arm","bicep","serverless"],"required":False},
+        {"key":"quiet","label":"Quiet","type":"enum","values":["true","false"],"required":False,"default":"true"},
+        {"key":"skip_download","label":"Skip Download","type":"enum","values":["true","false"],"required":False,"default":"true"},
+        {"key":"output","label":"Output Format","type":"enum","values":["json","junitxml","sarif","cli"],"required":False,"default":"json"},
+        {"key":"timeout_sec","label":"Timeout (sec)","type":"string","required":False,"placeholder":"300"},
+        {"key":"pip_install","label":"Auto pip install","type":"enum","values":["true","false"],"required":False,"default":"true"},
+        {"key":"pip_index_url","type":"string","required":False},
+        {"key":"pip_extra_args","type":"string","required":False},
+    ]
+    cli = ["checkov -d ./iac -o json --quiet"]
+    return _detail_template(defaults, options, cli, "checkov")
+
+def _build_checkov_args(payload: Dict[str, Any]) -> List[str]:
+    if not payload.get("directory"):
+        raise ValueError("directory is required")
+    args = ["checkov", "-d", str(payload["directory"])]
+    if (fw := payload.get("framework")): args += ["--framework", str(fw)]
+    if str(payload.get("quiet","true")).lower() == "true": args += ["--quiet"]
+    if str(payload.get("skip_download","true")).lower() == "true": args += ["--skip-download"]
+    args += ["-o", str(payload.get("output","json"))]
+    return args
+
+# ----- Trivy -----
+def _trivy_detail(base: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = merge({
+        "code": "trivy",
+        "name": "Trivy",
+        "category": "container-security",
+        "tags": ["container","kubernetes","sbom","iac","vulnerability"],
+        "homepage": "https://github.com/aquasecurity/trivy",
+        "desc": "컨테이너/FS/K8s/IaC 취약점/오탑재 스캐너",
+        "license": "Apache-2.0",
+    }, base or {})
+    options = [
+        {"key":"mode","label":"Scan Mode","type":"enum","values":["image","fs","repo","k8s"],"required":True,"default":"image"},
+        {"key":"target","label":"Target (image path/dir/repo)","type":"string","required":True,"placeholder":"nginx:latest or ./"},
+        {"key":"format","label":"Output Format","type":"enum","values":["table","json","sarif","cyclonedx"],"required":False,"default":"json"},
+        {"key":"severity","label":"Severity filter","type":"string","required":False,"placeholder":"CRITICAL,HIGH"},
+        {"key":"timeout_sec","label":"Timeout (sec)","type":"string","required":False,"placeholder":"600"},
+        {"key":"pip_install","label":"Auto pip install (via pipx)","type":"enum","values":["false"],"required":False,"default":"false"},
+    ]
+    cli = ["trivy image nginx:latest --format json"]
+    return _detail_template(defaults, options, cli, "trivy")
+
+def _build_trivy_args(payload: Dict[str, Any]) -> List[str]:
+    mode = str(payload.get("mode","image"))
+    target = payload.get("target")
+    if not target:
+        raise ValueError("target is required")
+    args = ["trivy", mode, str(target)]
+    if (fmt := payload.get("format")): args += ["--format", str(fmt)]
+    if (sev := payload.get("severity")): args += ["--severity", str(sev)]
+    return args
+
+# ----- Gitleaks -----
+def _gitleaks_detail(base: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = merge({
+        "code": "gitleaks",
+        "name": "Gitleaks",
+        "category": "secrets-detection",
+        "tags": ["secrets","git","ci","detection"],
+        "homepage": "https://github.com/gitleaks/gitleaks",
+        "desc": "Git 리포/디렉터리에서 비밀키/자격증명 유출 탐지",
+        "license": "MIT",
+    }, base or {})
+    options = [
+        {"key":"source","label":"Scan Source (path or git url)","type":"string","required":True,"placeholder":"./ or file://./repo"},
+        {"key":"report","label":"Report Path","type":"string","required":False,"placeholder":"./outputs/gitleaks.json"},
+        {"key":"format","label":"Format","type":"enum","values":["json","sarif","csv","junit"],"required":False,"default":"json"},
+        {"key":"timeout_sec","label":"Timeout (sec)","type":"string","required":False,"placeholder":"300"},
+        {"key":"pip_install","label":"Auto pip install","type":"enum","values":["false"],"required":False,"default":"false"},
+    ]
+    cli = ["gitleaks detect -s . -f json -r ./outputs/gitleaks.json"]
+    return _detail_template(defaults, options, cli, "gitleaks")
+
+def _build_gitleaks_args(payload: Dict[str, Any]) -> List[str]:
+    src = payload.get("source")
+    if not src:
+        raise ValueError("source is required")
+    args = ["gitleaks", "detect", "-s", str(src)]
+    fmt = str(payload.get("format","json"))
+    args += ["-f", fmt]
+    if (rp := payload.get("report")): args += ["-r", str(rp)]
+    return args
+
+# ----- Cloud Custodian -----
+def _custodian_detail(base: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = merge({
+        "code": "custodian",
+        "name": "Cloud Custodian",
+        "category": "cloud-governance",
+        "tags": ["aws","azure","gcp","policy-as-code","remediation"],
+        "homepage": "https://github.com/cloud-custodian/cloud-custodian",
+        "desc": "정책-as-코드 기반 감지/자동 시정 및 증적",
+        "license": "Apache-2.0",
+    }, base or {})
+    options = [
+        {"key":"policy","label":"Policy YAML","type":"string","required":True,"placeholder":"./policies.yml"},
+        {"key":"output","label":"Output Dir","type":"string","required":False,"placeholder":"./outputs"},
+        {"key":"region","label":"Region (aws)","type":"string","required":False,"placeholder":"ap-northeast-2"},
+        {"key":"timeout_sec","label":"Timeout (sec)","type":"string","required":False,"placeholder":"1200"},
+        {"key":"pip_install","label":"Auto pip install","type":"enum","values":["true","false"],"required":False,"default":"true"},
+        {"key":"pip_index_url","type":"string","required":False},
+        {"key":"pip_extra_args","type":"string","required":False},
+    ]
+    cli = ["custodian run -s ./outputs policies.yml"]
+    return _detail_template(defaults, options, cli, "custodian")
+
+def _build_custodian_args(payload: Dict[str, Any]) -> List[str]:
+    if not payload.get("policy"):
+        raise ValueError("policy is required")
+    args = ["custodian", "run", "-s", str(payload.get("output","./outputs")), str(payload["policy"])]
+    if (r := payload.get("region")): args += ["-r", str(r)]
+    return args
+
+# ----- Steampipe -----
+def _steampipe_detail(base: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = merge({
+        "code": "steampipe",
+        "name": "Steampipe (mods)",
+        "category": "cloud-compliance",
+        "tags": ["sql","aws","compliance","report"],
+        "homepage": "https://steampipe.io",
+        "desc": "클라우드를 SQL로 질의, 모드로 컴플라이언스 리포트 생성",
+        "license": "AGPL-3.0",
+    }, base or {})
+    options = [
+        {"key":"mod","label":"Mod (e.g., steampipe-mod-aws-compliance)","type":"string","required":True},
+        {"key":"benchmark","label":"Benchmark (optional)","type":"string","required":False,"placeholder":"benchmark.cis_v200"},
+        {"key":"output","label":"Output Dir (reports)","type":"string","required":False,"placeholder":"./outputs"},
+        {"key":"timeout_sec","label":"Timeout (sec)","type":"string","required":False,"placeholder":"1200"},
+        {"key":"pip_install","label":"Auto pip install","type":"enum","values":["false"],"required":False,"default":"false"},
+    ]
+    cli = ["steampipe check all --export"]
+    return _detail_template(defaults, options, cli, "steampipe")
+
+def _build_steampipe_args(payload: Dict[str, Any]) -> List[str]:
+    if not payload.get("mod"):
+        raise ValueError("mod is required")
+    # steampipe는 기본적으로 steampipe cli + mods 디렉토리 필요
+    # 여기서는 단순 check 호출 예시만 제공
+    args = ["steampipe", "check"]
+    if (bm := payload.get("benchmark")):
+        args += [str(bm)]
+    else:
+        args += ["all"]
+    if (out := payload.get("output")):
+        args += ["--export", str(out)]
+    else:
+        args += ["--export", "./outputs"]
+    return args
+
+# ----- Scout Suite -----
+def _scout_detail(base: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = merge({
+        "code": "scout",
+        "name": "Scout Suite",
+        "category": "cloud-security",
+        "tags": ["aws","azure","gcp","assessment","report"],
+        "homepage": "https://github.com/nccgroup/ScoutSuite",
+        "desc": "멀티클라우드 구성 점검 후 HTML 리포트 생성",
+        "license": "GPL-2.0",
+    }, base or {})
+    options = [
+        {"key":"provider","label":"Provider","type":"enum","values":["aws","azure","gcp"],"required":True,"default":"aws"},
+        {"key":"profile","label":"AWS CLI Profile","type":"string","required":False,"placeholder":"default","visible_if":{"provider":"aws"}},
+        {"key":"output","label":"Output Dir","type":"string","required":False,"placeholder":"./outputs"},
+        {"key":"timeout_sec","label":"Timeout (sec)","type":"string","required":False,"placeholder":"1800"},
+        {"key":"pip_install","label":"Auto pip install","type":"enum","values":["true","false"],"required":False,"default":"true"},
+        {"key":"pip_index_url","type":"string","required":False},
+        {"key":"pip_extra_args","type":"string","required":False},
+    ]
+    cli = ["scout aws --report-dir ./outputs"]
+    return _detail_template(defaults, options, cli, "scout")
+
+def _build_scout_args(payload: Dict[str, Any]) -> List[str]:
+    provider = str(payload.get("provider","aws"))
+    if provider not in {"aws","azure","gcp"}:
+        raise ValueError("Unsupported provider")
+    args = ["scout", provider]
+    if (out := payload.get("output")): args += ["--report-dir", str(out)]
+    return args
+
+# ---------- 서비스 API(카탈로그/디테일/시뮬) ----------
 
 def get_catalog(q: Optional[str] = None) -> Dict[str, Any]:
     items = list_items()
     if q:
         ql = q.lower()
-        items = [
-            it for it in items
-            if any((str(it.get(k, "")).lower().find(ql) >= 0) for k in ("name", "code", "category", "desc"))
-        ]
+        items = [it for it in items if any((str(it.get(k, "")).lower().find(ql) >= 0) for k in ("name","code","category","desc"))]
     return {"items": items}
 
 def get_detail(code: str) -> Dict[str, Any]:
     item = get_item_by_code(code)
     if not item:
         return {"error": 404, "message": f"'{code}' 항목을 찾을 수 없습니다."}
-
-    if code == "prowler":
-        return _prowler_detail(item)
-
-    return {
-        **item,
-        "detail": {
-            "about": "이 항목은 아직 상세 템플릿이 없습니다.",
-            "use_endpoint": None,
-        },
+    # 도구별 디테일
+    DETAIL = {
+        "prowler": _prowler_detail,
+        "checkov": _checkov_detail,
+        "trivy": _trivy_detail,
+        "gitleaks": _gitleaks_detail,
+        "custodian": _custodian_detail,
+        "steampipe": _steampipe_detail,
+        "scout": _scout_detail,
     }
+    if code in DETAIL:
+        return DETAIL[code](item)
+    # 기본
+    return {**item, "detail": {"about": "이 항목은 아직 상세 템플릿이 없습니다.", "use_endpoint": None}}
+
+def _build_command_for(code: str, payload: Dict[str, Any]) -> List[str]:
+    BUILDERS: Dict[str, Callable[[Dict[str, Any]], List[str]]] = {
+        "prowler": _build_prowler_args,
+        "checkov": _build_checkov_args,
+        "trivy": _build_trivy_args,
+        "gitleaks": _build_gitleaks_args,
+        "custodian": _build_custodian_args,
+        "steampipe": _build_steampipe_args,
+        "scout": _build_scout_args,
+    }
+    if code not in BUILDERS:
+        raise ValueError(f"Unsupported tool: {code}")
+    return BUILDERS[code](payload)
+
+# ---------- 서비스 API(시뮬레이트) ----------
 
 def simulate_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     item = get_item_by_code(code)
     if not item:
         return {"error": 404, "message": f"'{code}' 항목을 찾을 수 없습니다."}
-    if code != "prowler":
-        return {"error": 400, "message": "현재는 prowler만 시뮬레이션을 지원합니다."}
-
-    command = _build_prowler_command(payload or {})
-    return {
-        "code": code,
-        "name": item.get("name"),
-        "simulate": True,
-        "command": command,
-        "note": "이 API는 커맨드 문자열만 반환하며 실제 실행은 하지 않습니다.",
-    }
+    try:
+        cmd_list = _build_command_for(code, payload or {})
+    except Exception as e:
+        return {"error": 400, "message": f"Invalid options: {e}"}
+    command = " ".join(shlex.quote(x) for x in cmd_list)
+    return {"code": code, "name": item.get("name"), "simulate": True, "command": command, "note": "명령만 생성, 실행은 하지 않음"}
 
 # ---------- 서비스 API(실행) ----------
 
 def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    실제 커맨드 실행. stdout/stderr/rc/실행시간/생성파일 목록 + (선행 pip 설치 로그) 반환.
-    """
     item = get_item_by_code(code)
     if not item:
         return {"error": 404, "message": f"'{code}' 항목을 찾을 수 없습니다."}
-    if code != "prowler":
-        return {"error": 400, "message": "현재는 prowler만 실행을 지원합니다."}
 
-    # -------------------- ⬇ pip install (옵션) --------------------
-    pip_install_flag = str(payload.get("pip_install", "true")).lower() == "true"
+    # 실행 디렉토리/출력 경로
+    base_run_dir = _safe_run_dir("./runs")
+    out_dir = _sanitize_subdir(base_run_dir, payload.get("output"))
+
+    # payload 보정
+    payload = dict(payload or {})
+    if "output" in payload and payload["output"]:
+        payload["output"] = out_dir  # 안전 경로로 강제
+
+    # pip 설치 옵션
+    pip_install_flag = str(payload.get("pip_install","true")).lower() == "true"
     pip_index_url = payload.get("pip_index_url") or None
     pip_extra_args = payload.get("pip_extra_args") or None
-    preinstall_info = ensure_prowler(
-        pip_install=pip_install_flag,
-        index_url=pip_index_url,
-        extra_args=pip_extra_args,
-    )
-    # 설치 실패해도 일단 계속 진행(사용자가 일부 기능만 쓸 수도 있음)
 
-    # -------------------- 실행 디렉토리/출력 경로 --------------------
-    base_run_dir = _safe_run_dir("./runs")
-    user_out = payload.get("output")
-    out_dir = _sanitize_subdir(base_run_dir, user_out)
+    # 도구 레지스트리 (bin, pip_pkg)
+    TOOLS = {
+        "prowler":  {"bin":"prowler",  "pip":"prowler"},
+        "checkov":  {"bin":"checkov",  "pip":"checkov"},
+        "trivy":    {"bin":"trivy",    "pip":None},         # 보통 바이너리 배포; pip 설치 비권장
+        "gitleaks": {"bin":"gitleaks", "pip":None},         # 바이너리 배포
+        "custodian":{"bin":"custodian","pip":"c7n"},
+        "steampipe":{"bin":"steampipe","pip":None},         # 설치 스크립트/패키지
+        "scout":    {"bin":"scout",    "pip":"ScoutSuite"},
+    }
+    if code not in TOOLS:
+        return {"error": 400, "message": f"Unsupported tool: {code}"}
+    bin_name, pip_pkg = TOOLS[code]["bin"], TOOLS[code]["pip"]
 
-    # prowler 인자 생성 (출력 디렉토리 강제)
-    payload = dict(payload or {})
-    payload["output"] = out_dir
-    try:
-        args = _build_prowler_args(payload)
-    except Exception as e:
-        return {"error": 400, "message": f"Invalid options: {e}", "preinstall": preinstall_info}
+    # ensure
+    preinstall_info = ensure_tool(bin_name, pip_pkg, pip_install_flag, pip_index_url, pip_extra_args)
 
-    # 환경변수 (AWS_PROFILE 등)
+    # env (AWS_PROFILE 등)
     env = os.environ.copy()
-    profile = payload.get("profile")
-    if profile and payload.get("provider", "aws") == "aws":
-        env["AWS_PROFILE"] = str(profile)
+    if payload.get("profile"):
+        env["AWS_PROFILE"] = str(payload["profile"])
 
-    # 타임아웃
+    # timeout
     try:
         timeout_sec = int(str(payload.get("timeout_sec", "600")))
     except ValueError:
         timeout_sec = 600
 
+    # build args
+    try:
+        args = _build_command_for(code, payload)
+    except Exception as e:
+        return {"error": 400, "message": f"Invalid options: {e}", "preinstall": preinstall_info}
+
     # 실행
     started = time.time()
     try:
-        result = subprocess.run(
-            args,
-            cwd=base_run_dir,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-        )
-        rc = result.returncode
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
+        result = subprocess.run(args, cwd=base_run_dir, env=env, capture_output=True, text=True, timeout=timeout_sec)
+        rc, stdout, stderr = result.returncode, result.stdout or "", result.stderr or ""
     except subprocess.TimeoutExpired as te:
-        rc = -1
-        stdout = te.stdout or ""
-        stderr = (te.stderr or "") + f"\n[ERROR] Timeout after {timeout_sec} sec"
+        rc, stdout, stderr = -1, (te.stdout or ""), (te.stderr or "") + f"\n[ERROR] Timeout after {timeout_sec} sec"
     except FileNotFoundError:
-        rc = 127
-        stdout = ""
-        stderr = "[ERROR] prowler 바이너리를 찾을 수 없습니다. PATH 또는 설치 상태를 확인하세요."
+        rc, stdout, stderr = 127, "", f"[ERROR] '{bin_name}' 바이너리를 찾을 수 없습니다. PATH/설치 상태 확인"
     except Exception as e:
-        rc = 1
-        stdout = ""
-        stderr = f"[ERROR] Unexpected: {e}"
+        rc, stdout, stderr = 1, "", f"[ERROR] Unexpected: {e}"
     duration_ms = int((time.time() - started) * 1000)
 
-    def _clip(s: str, limit: int = 200_000) -> str:
-        if len(s) > limit:
-            return s[:limit] + f"\n...[truncated {len(s)-limit} bytes]"
-        return s
-
     files = _list_files_under(out_dir)
-
     return {
         "code": code,
         "command": " ".join(shlex.quote(x) for x in args),
@@ -462,34 +506,26 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "stderr": _clip(stderr),
         "files": files,
         "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
-        "preinstall": preinstall_info,  # ⬅ 설치 전/후 확인 및 pip 로그 포함
+        "preinstall": preinstall_info,
     }
 
+# ---------- 스트리밍 ----------
+
 async def _aiter_stream_popen(cmd: list[str], cwd: str | None = None, env: dict | None = None, timeout: int | None = None):
-    """
-    asyncio 기반으로 프로세스 stdout/stderr를 실시간으로 합쳐 흘려보냄.
-    """
     proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=cwd,
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        *cmd, cwd=cwd, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
     try:
         start = time.time()
-        # 라인 단위로 push
         assert proc.stdout is not None
         while True:
             line = await proc.stdout.readline()
             if not line:
                 break
-            yield line  # bytes
+            yield line
             if timeout and (time.time() - start) > timeout:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+                try: proc.kill()
+                except ProcessLookupError: pass
                 yield f"\n[ERROR] Timeout after {timeout} sec\n".encode()
                 break
         rc = await proc.wait()
@@ -498,84 +534,76 @@ async def _aiter_stream_popen(cmd: list[str], cwd: str | None = None, env: dict 
         yield f"\n[ERROR] {e}\n".encode()
 
 async def iter_run_stream(code: str, payload: Dict[str, Any]):
-    """
-    설치(pip) → 존재확인 → prowler 실행을 순차로 스트리밍.
-    마지막에 생성 파일 목록도 JSON 한 번 출력.
-    """
-    # 기본 검증/경로 준비는 기존 run_tool 과 동일
     item = get_item_by_code(code)
     if not item:
-        yield b'{"error":404,"message":"item not found"}\n'
-        return
-    if code != "prowler":
-        yield b'{"error":400,"message":"only prowler supported"}\n'
-        return
+        yield b'{"error":404,"message":"item not found"}\n'; return
 
-    # 실행 디렉토리/출력 디렉토리 확보
+    # 안전 경로/보정
     base_run_dir = _safe_run_dir("./runs")
-    user_out = payload.get("output")
-    out_dir = _sanitize_subdir(base_run_dir, user_out)
-
-    # payload 보정
+    out_dir = _sanitize_subdir(base_run_dir, payload.get("output"))
     payload = dict(payload or {})
-    payload["output"] = out_dir
+    if payload.get("output"):
+        payload["output"] = out_dir
 
-    # 타임아웃
-    try:
-        timeout_sec = int(str(payload.get("timeout_sec", "600")))
-    except ValueError:
-        timeout_sec = 600
+    # timeout/env
+    try: timeout_sec = int(str(payload.get("timeout_sec","600")))
+    except ValueError: timeout_sec = 600
+    env = os.environ.copy()
+    if payload.get("profile"): env["AWS_PROFILE"] = str(payload["profile"])
+
+    # 레지스트리
+    TOOLS = {
+        "prowler":  {"bin":"prowler",  "pip":"prowler"},
+        "checkov":  {"bin":"checkov",  "pip":"checkov"},
+        "trivy":    {"bin":"trivy",    "pip":None},
+        "gitleaks": {"bin":"gitleaks", "pip":None},
+        "custodian":{"bin":"custodian","pip":"c7n"},
+        "steampipe":{"bin":"steampipe","pip":None},
+        "scout":    {"bin":"scout",    "pip":"ScoutSuite"},
+    }
+    if code not in TOOLS:
+        yield b'{"error":400,"message":"unsupported tool"}\n'; return
+    bin_name, pip_pkg = TOOLS[code]["bin"], TOOLS[code]["pip"]
 
     # pip 설치 여부
-    pip_install_flag = str(payload.get("pip_install", "true")).lower() == "true"
+    pip_install_flag = str(payload.get("pip_install","true")).lower() == "true"
     pip_index_url = payload.get("pip_index_url") or None
     pip_extra_args = payload.get("pip_extra_args") or None
 
-    # 프로파일 환경
-    env = os.environ.copy()
-    profile = payload.get("profile")
-    if profile and payload.get("provider", "aws") == "aws":
-        env["AWS_PROFILE"] = str(profile)
-
-    # 1) pip install (옵션)
-    if pip_install_flag:
-        yield b"===== [STEP] pip install prowler =====\n"
-        args = [sys.executable, "-m", "pip", "install", "prowler"]
-        if pip_index_url:
-            args += ["--index-url", str(pip_index_url)]
-        if pip_extra_args:
-            args += shlex.split(pip_extra_args)
+    # 1) ensure/install
+    if pip_install_flag and pip_pkg:
+        yield f"===== [STEP] pip install {pip_pkg} =====\n".encode()
+        args = [sys.executable, "-m", "pip", "install", pip_pkg]
+        if pip_index_url: args += ["--index-url", str(pip_index_url)]
+        if pip_extra_args: args += shlex.split(pip_extra_args)
         async for chunk in _aiter_stream_popen(args, env=env, timeout=900):
             yield chunk
 
-    # 2) prowler -v 확인
-    yield b"\n===== [STEP] check prowler =====\n"
-    async for chunk in _aiter_stream_popen(["prowler", "-v"], env=env, timeout=60):
+    # 2) version check
+    yield b"\n===== [STEP] check tool =====\n"
+    ver_cmd = [bin_name, "--version"]
+    async for chunk in _aiter_stream_popen(ver_cmd, env=env, timeout=60):
         yield chunk
 
-    # 3) prowler 실행
+    # 3) build & run
     try:
-        args = _build_prowler_args(payload)
+        args = _build_command_for(code, payload)
     except Exception as e:
-        yield f'\n{{"error":400,"message":"Invalid options: {e}"}}\n'.encode()
-        return
+        yield (f'\n{{"error":400,"message":"Invalid options: {e}"}}\n').encode(); return
 
-    yield b"\n===== [STEP] run prowler =====\n"
-    yield f"$ {' '.join(shlex.quote(x) for x in args)}\n".encode()
+    yield b"\n===== [STEP] run =====\n"
+    yield (f"$ {' '.join(shlex.quote(x) for x in args)}\n").encode()
     start_ts = time.time()
     async for chunk in _aiter_stream_popen(args, cwd=base_run_dir, env=env, timeout=timeout_sec):
         yield chunk
     duration_ms = int((time.time() - start_ts) * 1000)
 
-    # 4) 생성 파일 목록 요약 JSON
     files = _list_files_under(out_dir)
-    tail = {
-        "summary": {
-            "run_dir": os.path.relpath(base_run_dir, os.getcwd()),
-            "output_dir": os.path.relpath(out_dir, os.getcwd()),
-            "duration_ms": duration_ms,
-            "files": files,
-        }
-    }
+    tail = {"summary": {
+        "run_dir": os.path.relpath(base_run_dir, os.getcwd()),
+        "output_dir": os.path.relpath(out_dir, os.getcwd()),
+        "duration_ms": duration_ms,
+        "files": files,
+    }}
     yield b"\n===== [STEP] summary =====\n"
     yield (json.dumps(tail, ensure_ascii=False) + "\n").encode()

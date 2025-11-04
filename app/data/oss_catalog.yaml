@@ -6,3 +6,51 @@ items:
     homepage: "https://github.com/prowler-cloud/prowler"
     desc: "AWS 등 여러 클라우드 환경에 대한 보안 점검 자동화 CLI 도구"
     license: "Apache-2.0"
+
+  - code: checkov
+    name: "Checkov"
+    category: "iac-security"
+    tags: ["terraform", "cloudformation", "kubernetes", "helm", "iac", "sast"]
+    homepage: "https://github.com/bridgecrewio/checkov"
+    desc: "IaC 정적 분석(SAST)으로 보안/컴플라이언스 위반을 탐지"
+    license: "Apache-2.0"
+
+  - code: trivy
+    name: "Trivy"
+    category: "container-security"
+    tags: ["container", "kubernetes", "sbom", "iac", "vulnerability"]
+    homepage: "https://github.com/aquasecurity/trivy"
+    desc: "컨테이너/파일시스템/K8s/IaC 취약점과 구성 이슈 스캐너"
+    license: "Apache-2.0"
+
+  - code: gitleaks
+    name: "Gitleaks"
+    category: "secrets-detection"
+    tags: ["secrets", "git", "ci", "detection"]
+    homepage: "https://github.com/gitleaks/gitleaks"
+    desc: "Git 리포/디렉터리에서 비밀키/자격증명 유출 탐지"
+    license: "MIT"
+
+  - code: custodian
+    name: "Cloud Custodian"
+    category: "cloud-governance"
+    tags: ["aws", "azure", "gcp", "policy-as-code", "remediation"]
+    homepage: "https://github.com/cloud-custodian/cloud-custodian"
+    desc: "정책-as-코드 기반으로 감지/자동 시정과 증적 산출"
+    license: "Apache-2.0"
+
+  - code: steampipe
+    name: "Steampipe (mods)"
+    category: "cloud-compliance"
+    tags: ["sql", "aws", "compliance", "report"]
+    homepage: "https://steampipe.io"
+    desc: "클라우드 리소스를 SQL처럼 질의, 모드(mods)로 컴플라이언스 리포트 생성"
+    license: "AGPL-3.0"
+
+  - code: scout
+    name: "Scout Suite"
+    category: "cloud-security"
+    tags: ["aws", "azure", "gcp", "assessment", "report"]
+    homepage: "https://github.com/nccgroup/ScoutSuite"
+    desc: "멀티클라우드 구성 점검 후 HTML 리포트 생성"
+    license: "GPL-2.0"
