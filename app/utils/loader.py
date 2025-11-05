@@ -1,4 +1,6 @@
-# app/utils/loader.py
+# =========================
+# file: app/utils/loader.py
+# =========================
 from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
@@ -17,7 +19,6 @@ def load_catalog() -> Dict[str, Any]:
     path = _catalog_path()
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-    # 정규화
     items = data.get("items") or []
     by_code = {str(i.get("code")).strip(): i for i in items if i.get("code")}
     _CATALOG_CACHE = {"items": items, "by_code": by_code}

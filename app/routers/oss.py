@@ -42,10 +42,8 @@ def run_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=data.get("error", 400), detail=data.get("message", "Unknown error"))
     return data
 
-# ✅ 실시간 로그 스트리밍(텍스트 스트림)
 @router.post("/{code}/run/stream", summary="오픈소스 실행 (실시간 스트림)")
 async def run_stream(code: str, request: Request) -> StreamingResponse:
-    # ⚠️ 빈 바디/비-JSON도 안전 처리
     payload: Dict[str, Any] = {}
     try:
         ct = (request.headers.get("content-type") or "").lower()
@@ -55,13 +53,10 @@ async def run_stream(code: str, request: Request) -> StreamingResponse:
                 payload = json.loads(raw.decode("utf-8"))
         elif "application/x-www-form-urlencoded" in ct or "multipart/form-data" in ct:
             form = await request.form()
-            # FormData -> dict로 단순 변환
             payload = {k: v for k, v in form.items()}
         else:
             payload = {}
     except Exception:
-        # 파싱 실패해도 스트림은 기본 옵션으로 진행
         payload = {}
-
     gen = svc_iter_run_stream(code, payload or {})
     return StreamingResponse(gen, media_type="text/plain; charset=utf-8")

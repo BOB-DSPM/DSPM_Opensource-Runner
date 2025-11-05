@@ -73,7 +73,6 @@ def _clip(s: str, limit: int = 200_000) -> str:
 def _check_bin_exists(bin_name: str) -> Dict[str, Any]:
     try:
         res = subprocess.run([bin_name, "--version"], capture_output=True, text=True, timeout=30)
-        # 일부 도구는 -v 등으로만 버전 출력. 존재 여부는 FileNotFoundError 여부로 충분.
         exists = (res.returncode == 0) or bool(res.stdout or res.stderr)
         return {"exists": exists, "rc": res.returncode, "stdout": res.stdout, "stderr": res.stderr}
     except FileNotFoundError:
@@ -109,7 +108,6 @@ def _run_install_cmds(cmds: Iterable[List[str]], cwd: str | None = None, env: di
             res = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
             logs.append({"cmd": " ".join(shlex.quote(x) for x in cmd), "rc": res.returncode, "stdout": res.stdout, "stderr": res.stderr})
             if res.returncode == 0:
-                # 성공하면 설치 완료로 간주하고 중단할 수 있음(정책에 따라 변경 가능)
                 return True, logs
         except Exception as e:
             logs.append({"cmd": " ".join(shlex.quote(x) for x in cmd), "rc": -1, "stdout": "", "stderr": str(e)})
@@ -123,15 +121,10 @@ def ensure_tool_extended(
     extra_args: Optional[str],
     install_cmds: Optional[Iterable[Iterable[str]]] = None
 ) -> Dict[str, Any]:
-    """
-    기존 ensure_tool에 'install_cmds' 옵션을 추가.
-    - install_cmds: [["sudo","apt","install","-y","trivy"], ...] 처럼 쉘 메타문자 없이 분리된 리스트만 허용.
-    """
     pre = _check_bin_exists(bin_name)
     installed, pip_log, bin_install_log = False, None, None
 
     if not pre.get("exists", False):
-        # 1) pip 설치 시도
         if pip_install and pip_pkg:
             pip_log = _pip_install(pip_pkg, index_url, extra_args, timeout=900)
             post = _check_bin_exists(bin_name)
@@ -139,7 +132,6 @@ def ensure_tool_extended(
             if installed:
                 return {"checked_before": pre, "installed": True, "check_after": post, "pip_log": pip_log, "bin_install_log": None}
 
-        # 2) 바이너리 설치 시도
         if install_cmds:
             ok, bin_install_log = _run_install_cmds(install_cmds, timeout=900)
             post = _check_bin_exists(bin_name)
@@ -356,9 +348,16 @@ def _steampipe_detail(base: Dict[str, Any]) -> Dict[str, Any]:
         "license": "AGPL-3.0",
     }, base or {})
     options = [
-        {"key":"mod","label":"Mod (e.g., steampipe-mod-aws-compliance)","type":"string","required":True},
+        {
+            "key": "mod",
+            "label": "Mod (e.g., turbot/steampipe-mod-aws-compliance)",
+            "type": "string",
+            "required": True,
+            "default": "turbot/steampipe-mod-aws-compliance",
+            "help": "GitHub org/repo 형태 권장. 예) turbot/steampipe-mod-aws-compliance",
+        },
         {"key":"benchmark","label":"Benchmark (optional)","type":"string","required":False,"placeholder":"benchmark.cis_v200"},
-        {"key":"output","label":"Output Dir (reports)","type":"string","required":False,"placeholder":"./outputs"},
+        {"key":"output","label":"Output Dir (reports)","type":"string","required":False,"placeholder":"./outputs","default":"./outputs"},
         {"key":"timeout_sec","label":"Timeout (sec)","type":"string","required":False,"placeholder":"1200"},
         {"key":"pip_install","label":"Auto pip install","type":"enum","values":["false"],"required":False,"default":"false"},
     ]
@@ -423,7 +422,6 @@ def get_detail(code: str) -> Dict[str, Any]:
     item = get_item_by_code(code)
     if not item:
         return {"error": 404, "message": f"'{code}' 항목을 찾을 수 없습니다."}
-    # 도구별 디테일
     DETAIL = {
         "prowler": _prowler_detail,
         "checkov": _checkov_detail,
@@ -435,7 +433,6 @@ def get_detail(code: str) -> Dict[str, Any]:
     }
     if code in DETAIL:
         return DETAIL[code](item)
-    # 기본
     return {**item, "detail": {"about": "이 항목은 아직 상세 템플릿이 없습니다.", "use_endpoint": None}}
 
 def _build_command_for(code: str, payload: Dict[str, Any]) -> List[str]:
@@ -458,7 +455,6 @@ TOOLS: Dict[str, Dict[str, Any]] = {
     "prowler":  {"bin":"prowler",  "pip":"prowler", "install_cmds": None},
     "checkov":  {"bin":"checkov",  "pip":"checkov", "install_cmds": None},
     "trivy":    {"bin":"trivy",    "pip":None,      "install_cmds": [
-        # Debian/Ubuntu (requires sudo)
         ["sudo","apt","update"],
         ["sudo","apt","install","-y","trivy"],
     ]},
@@ -468,8 +464,8 @@ TOOLS: Dict[str, Dict[str, Any]] = {
     ]},
     "custodian":{"bin":"custodian","pip":"c7n",     "install_cmds": None},
     "steampipe":{"bin":"steampipe","pip":None,      "install_cmds": [
-        # 배포 환경에 맞는 설치 스크립트를 추가하세요.
-        # ["sudo","apt","install","-y","steampipe"]  # 예시(실제 패키지명은 배포판마다 다름)
+        # 필요한 배포판 설치커맨드 추가 가능
+        # ["sudo","apt","install","-y","steampipe"]
     ]},
     "scout":    {"bin":"scout",    "pip":"ScoutSuite","install_cmds": None},
 }
@@ -494,47 +490,38 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if not item:
         return {"error": 404, "message": f"'{code}' 항목을 찾을 수 없습니다."}
 
-    # 실행 디렉토리/출력 경로
     base_run_dir = _safe_run_dir("./runs")
     out_dir = _sanitize_subdir(base_run_dir, payload.get("output"))
 
-    # payload 보정
     payload = dict(payload or {})
     if "output" in payload and payload["output"]:
-        payload["output"] = out_dir  # 안전 경로로 강제
+        payload["output"] = out_dir
 
-    # pip 설치 옵션
     pip_install_flag = str(payload.get("pip_install","true")).lower() == "true"
     pip_index_url = payload.get("pip_index_url") or None
     pip_extra_args = payload.get("pip_extra_args") or None
 
-    # 도구 메타
     if code not in TOOLS:
         return {"error": 400, "message": f"Unsupported tool: {code}"}
     tool_meta = TOOLS[code]
     bin_name, pip_pkg, install_cmds = tool_meta["bin"], tool_meta.get("pip"), tool_meta.get("install_cmds")
 
-    # ensure (pip/바이너리 설치)
     preinstall_info = ensure_tool_extended(bin_name, pip_pkg, pip_install_flag, pip_index_url, pip_extra_args, install_cmds=install_cmds)
 
-    # env (AWS_PROFILE 등)
     env = os.environ.copy()
     if payload.get("profile"):
         env["AWS_PROFILE"] = str(payload["profile"])
 
-    # timeout
     try:
         timeout_sec = int(str(payload.get("timeout_sec", "600")))
     except ValueError:
         timeout_sec = 600
 
-    # build args
     try:
         args = _build_command_for(code, payload)
     except Exception as e:
         return {"error": 400, "message": f"Invalid options: {e}", "preinstall": preinstall_info}
 
-    # 실행
     started = time.time()
     try:
         result = subprocess.run(args, cwd=base_run_dir, env=env, capture_output=True, text=True, timeout=timeout_sec)
@@ -593,14 +580,12 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
     if not item:
         yield b'{"error":404,"message":"item not found"}\n'; return
 
-    # 안전 경로/보정
     base_run_dir = _safe_run_dir("./runs")
     out_dir = _sanitize_subdir(base_run_dir, payload.get("output"))
     payload = dict(payload or {})
     if payload.get("output"):
         payload["output"] = out_dir
 
-    # timeout/env
     try:
         timeout_sec = int(str(payload.get("timeout_sec","600")))
     except ValueError:
@@ -609,18 +594,15 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
     if payload.get("profile"):
         env["AWS_PROFILE"] = str(payload["profile"])
 
-    # 레지스트리
     if code not in TOOLS:
         yield b'{"error":400,"message":"unsupported tool"}\n'; return
     tool_meta = TOOLS[code]
     bin_name, pip_pkg, install_cmds = tool_meta["bin"], tool_meta.get("pip"), tool_meta.get("install_cmds")
 
-    # pip 설치 여부
     pip_install_flag = str(payload.get("pip_install","true")).lower() == "true"
     pip_index_url = payload.get("pip_index_url") or None
     pip_extra_args = payload.get("pip_extra_args") or None
 
-    # 1) ensure/install (스트리밍으로 로그 출력)
     if pip_install_flag and pip_pkg:
         yield f"===== [STEP] pip install {pip_pkg} =====\n".encode()
         args = [sys.executable, "-m", "pip", "install", pip_pkg]
@@ -636,17 +618,14 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
         for cmd in install_cmds:
             async for chunk in _aiter_stream_popen(list(cmd), env=env, timeout=900):
                 yield chunk
-        # 설치 후 확인
         chk = _check_bin_exists(bin_name)
         yield (f"\n[check_after] exists={chk.get('exists')} rc={chk.get('rc')}\n").encode()
 
-    # 2) version check
     yield b"\n===== [STEP] check tool =====\n"
     ver_cmd = [bin_name, "--version"]
     async for chunk in _aiter_stream_popen(ver_cmd, env=env, timeout=60):
         yield chunk
 
-    # 3) build & run
     try:
         args = _build_command_for(code, payload)
     except Exception as e:
