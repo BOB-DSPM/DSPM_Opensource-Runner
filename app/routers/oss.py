@@ -1,17 +1,19 @@
-# app/routers/oss.py
+# =========================
+# file: app/routers/oss.py
+# =========================
 from __future__ import annotations
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-import json  # ⬅ 추가
+import json
 
-from ..services import (
+from ..services.oss_service import (
     get_catalog as svc_get_catalog,
     get_detail as svc_get_detail,
     simulate_use as svc_simulate_use,
+    run_tool as svc_run_tool,
+    iter_run_stream as svc_iter_run_stream,
 )
-from ..services.oss_service import run_tool as svc_run_tool
-from ..services.oss_service import iter_run_stream as svc_iter_run_stream
 
 router = APIRouter(prefix="/api/oss", tags=["oss"])
 
@@ -53,13 +55,12 @@ async def run_stream(code: str, request: Request) -> StreamingResponse:
                 payload = json.loads(raw.decode("utf-8"))
         elif "application/x-www-form-urlencoded" in ct or "multipart/form-data" in ct:
             form = await request.form()
-            # FormData -> dict로 단순 변환 (필요 시 키 필터링)
+            # FormData -> dict로 단순 변환
             payload = {k: v for k, v in form.items()}
         else:
-            # 바디 비어있거나 Content-Type 없는 경우: 기본값 사용
             payload = {}
     except Exception:
-        # 파싱 실패해도 스트림은 계속 진행 (옵션 기본값으로 실행)
+        # 파싱 실패해도 스트림은 기본 옵션으로 진행
         payload = {}
 
     gen = svc_iter_run_stream(code, payload or {})
