@@ -4,39 +4,15 @@ items:
     category: "cloud-security"
     tags: ["aws", "security", "audit", "cli"]
     homepage: "https://github.com/prowler-cloud/prowler"
-    desc: "AWS 등 여러 클라우드 환경에 대한 보안 점검 자동화 CLI 도구"
+    desc: "AWS 계정·서비스 설정을 점검하고 JSON/CSV/HTML 등 리포트(증적 파일)를 생성하는 보안 점검 CLI 도구"
     license: "Apache-2.0"
-
-  - code: checkov
-    name: "Checkov"
-    category: "iac-security"
-    tags: ["terraform", "cloudformation", "kubernetes", "helm", "iac", "sast"]
-    homepage: "https://github.com/bridgecrewio/checkov"
-    desc: "IaC 정적 분석(SAST)으로 보안/컴플라이언스 위반을 탐지"
-    license: "Apache-2.0"
-
-  - code: trivy
-    name: "Trivy"
-    category: "container-security"
-    tags: ["container", "kubernetes", "sbom", "iac", "vulnerability"]
-    homepage: "https://github.com/aquasecurity/trivy"
-    desc: "컨테이너/파일시스템/K8s/IaC 취약점과 구성 이슈 스캐너"
-    license: "Apache-2.0"
-
-  - code: gitleaks
-    name: "Gitleaks"
-    category: "secrets-detection"
-    tags: ["secrets", "git", "ci", "detection"]
-    homepage: "https://github.com/gitleaks/gitleaks"
-    desc: "Git 리포/디렉터리에서 비밀키/자격증명 유출 탐지"
-    license: "MIT"
 
   - code: custodian
     name: "Cloud Custodian"
     category: "cloud-governance"
     tags: ["aws", "azure", "gcp", "policy-as-code", "remediation"]
     homepage: "https://github.com/cloud-custodian/cloud-custodian"
-    desc: "정책-as-코드 기반으로 감지/자동 시정과 증적 산출"
+    desc: "정책-as-코드 기반으로 클라우드 자원 탐지·시정 및 증적(로그/JSON/S3 저장)을 남길 수 있는 자동화 도구"
     license: "Apache-2.0"
 
   - code: steampipe
@@ -44,7 +20,7 @@ items:
     category: "cloud-compliance"
     tags: ["sql", "aws", "compliance", "report"]
     homepage: "https://steampipe.io"
-    desc: "클라우드 리소스를 SQL처럼 질의, 모드(mods)로 컴플라이언스 리포트 생성"
+    desc: "클라우드 리소스를 SQL로 질의해 컴플라이언스 결과를 CSV/JSON/HTML 등으로 내보낼 수 있는 도구(모드/플러그인 사용)"
     license: "AGPL-3.0"
 
   - code: scout
@@ -52,5 +28,5 @@ items:
     category: "cloud-security"
     tags: ["aws", "azure", "gcp", "assessment", "report"]
     homepage: "https://github.com/nccgroup/ScoutSuite"
-    desc: "멀티클라우드 구성 점검 후 HTML 리포트 생성"
+    desc: "멀티클라우드 구성 점검 후 인터랙티브 HTML 및 JSON 리포트를 생성하여 증적을 제공하는 평가 도구"
     license: "GPL-2.0"
