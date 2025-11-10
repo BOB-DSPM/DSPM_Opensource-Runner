@@ -155,8 +155,7 @@ def _detail_template(defaults: Dict[str, Any], options: List[Dict[str, Any]], cl
             "disclaimer": "※ 커맨드 실행은 서버에서 수행됩니다. 신뢰된 옵션만 허용됩니다.",
         },
     }
-
-# ----- Prowler -----
+# --- [PATCH] prowler detail 옵션에 output_formats 추가 ---
 def _prowler_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge({
         "code": "prowler",
@@ -176,7 +175,9 @@ def _prowler_detail(base: Dict[str, Any]) -> Dict[str, Any]:
         {"key":"checks","label":"Checks","type":"array[string]","required":False},
         {"key":"compliance","label":"Compliance Frameworks","type":"array[string]","required":False},
         {"key":"severity","label":"Severity","type":"enum","values":["informational","low","medium","high","critical"],"required":False},
-        {"key":"format","label":"Output Format","type":"enum","values":["json","csv","html","json-asff"],"required":False,"default":"json"},
+        # ▼ 새 옵션: 여러 포맷 요청 (가능한 경우 --output-formats 로 전달)
+        {"key":"output_formats","label":"Output Formats","type":"array[string]","required":False,"placeholder":"csv,json-ocsf,html"},
+        {"key":"format","label":"(Legacy) Single Format","type":"enum","values":["json","csv","html","json-asff","json-ocsf"],"required":False},
         {"key":"output","label":"Output Path (dir)","type":"string","required":False,"placeholder":"./outputs"},
         {"key":"pip_install","label":"Auto pip install","type":"enum","values":["true","false"],"required":False,"default":"true"},
         {"key":"pip_index_url","label":"Pip Index URL","type":"string","required":False},
@@ -191,22 +192,38 @@ def _prowler_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     ]
     return _detail_template(defaults, options, cli_examples, "prowler")
 
+# --- [PATCH] prowler 커맨드 빌더: output_formats를 우선 시도 ---
 def _build_prowler_args(payload: Dict[str, Any]) -> List[str]:
     provider = str(payload.get("provider", "aws")).strip()
     if provider not in {"aws","azure","gcp","kubernetes","github","m365","oci","nhn"}:
         raise ValueError(f"Unsupported provider: {provider}")
     args: List[str] = ["prowler", provider]
+
     if (m := payload.get("list")) in {"checks","services","compliance","categories"}:
         args += [f"--list-{m}"]
     if provider == "aws" and (r := payload.get("region")):
         args += ["--regions", str(r)]
-    if (sv := _join_csv(payload.get("services"))): args += ["--services", sv]
-    if (ck := _join_csv(payload.get("checks"))):   args += ["--checks", ck]
+    if (sv := _join_csv(payload.get("services"))):   args += ["--services", sv]
+    if (ck := _join_csv(payload.get("checks"))):     args += ["--checks", ck]
     if (cp := _join_csv(payload.get("compliance"))): args += ["--compliance", cp]
-    if (sev := payload.get("severity")): args += ["--severity", str(sev)]
-    if (fmt := payload.get("format")):   args += ["--output", str(fmt)]
-    if (out := payload.get("output")):   args += ["--output-directory", str(out)]
+    if (sev := payload.get("severity")):             args += ["--severity", str(sev)]
+
+    # 포맷 지정: --output-formats(복수) 우선, 없으면 단일 --output
+    ofmts = payload.get("output_formats")
+    if ofmts:
+        if isinstance(ofmts, list):
+            args += ["--output-formats", ",".join([str(x) for x in ofmts if str(x).strip()])]
+        else:
+            args += ["--output-formats", str(ofmts)]
+    elif (fmt := payload.get("format")):
+        # 일부 버전은 --output 또는 --output-format 을 사용, 호환을 위해 --output 우선
+        args += ["--output", str(fmt)]
+
+    # 출력 디렉터리
+    if (out := payload.get("output")):
+        args += ["--output-directory", str(out)]
     return args
+
 
 # ----- Checkov -----
 def _checkov_detail(base: Dict[str, Any]) -> Dict[str, Any]:
