@@ -20,6 +20,7 @@ from datetime import datetime
 
 def _log_write_text(path: str, text: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    # 매 호출마다 open → write → close 하여 즉시 디스크 반영
     with open(path, "a", encoding="utf-8", errors="ignore") as f:
         f.write(text)
 
@@ -28,6 +29,76 @@ def _log_write_bytes(path: str, b: bytes) -> None:
     with open(path, "ab") as f:
         f.write(b)
 
+def _run_with_live_logging(args: List[str], cwd: Optional[str], env: Dict[str, str], timeout_sec: int, log_path: str) -> tuple[int, str, str, int]:
+    """
+    subprocess.Popen으로 stdout/stderr(merged)를 실시간으로 log.txt에 TEE.
+    반환: (rc, stdout_text, stderr_text(빈문자열), duration_ms)
+    """
+    started = time.time()
+    # 헤더 즉시 기록
+    started_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header = []
+    header.append(f"[START] {started_dt}\n")
+    header.append(f"[CWD]   {os.path.abspath(cwd or os.getcwd())}\n")
+    header.append(f"[CMD]   {' '.join(shlex.quote(x) for x in args)}\n")
+    header.append("-" * 80 + "\n")
+    _log_write_text(log_path, "".join(header))
+
+    # 실시간 TEE 시작
+    proc = subprocess.Popen(
+        args,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,  # line-buffered
+    )
+
+    collected_stdout: List[str] = []
+    timed_out = False
+
+    try:
+        # 라인 단위로 읽어서 즉시 파일에 기록
+        assert proc.stdout is not None
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            _log_write_text(log_path, line)  # 즉시 디스크 반영
+            collected_stdout.append(line)
+
+            # 타임아웃 체크 (수동)
+            if timeout_sec and (time.time() - started) > timeout_sec:
+                timed_out = True
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                _log_write_text(log_path, f"\n[ERROR] Timeout after {timeout_sec} sec\n")
+                break
+
+        rc = proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        rc = -1
+        _log_write_text(log_path, f"\n[ERROR] Timeout after {timeout_sec} sec (wait)\n")
+    except Exception as e:
+        rc = 1
+        _log_write_text(log_path, f"\n[ERROR] Unexpected: {e}\n")
+
+    duration_ms = int((time.time() - started) * 1000)
+
+    # 요약 꼬리 기록
+    _log_write_text(log_path, "-" * 80 + f"\n[RC] {rc}  [DURATION_MS] {duration_ms}\n")
+
+    # 여기서는 stderr를 병합했으므로 빈 문자열 반환
+    stdout_text = "".join(collected_stdout)
+    return rc, stdout_text, "", duration_ms
 # ---------- 내부 헬퍼 (공통) ----------
 
 def _join_csv(v: Any) -> Optional[str]:
@@ -511,7 +582,8 @@ def simulate_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     command = " ".join(shlex.quote(x) for x in cmd_list)
     return {"code": code, "name": item.get("name"), "simulate": True, "command": command, "note": "명령만 생성, 실행은 하지 않음"}
 
-# ---------- 서비스 API(실행) ----------
+
+# 기존 run_tool을 아래처럼 교체 (동기 실행에서도 log.txt에 실시간 기록)
 def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     item = get_item_by_code(code)
     if not item:
@@ -549,33 +621,17 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"error": 400, "message": f"Invalid options: {e}", "preinstall": preinstall_info}
 
-    # --- 여기서부터 log.txt 작성 ---
+    # === 실시간 로그 파일 경로 (output 폴더의 log.txt) ===
     log_path = os.path.join(out_dir, "log.txt")
-    started_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    header = []
-    header.append(f"[START] {started_dt}")
-    header.append(f"[CWD]   {os.path.abspath(base_run_dir)}")
-    header.append(f"[ENV]   AWS_PROFILE={env.get('AWS_PROFILE','')}")
-    header.append(f"[CMD]   {' '.join(shlex.quote(x) for x in args)}")
-    header.append("-" * 80 + "\n")
-    _log_write_text(log_path, "\n".join(header) + "\n")
 
-    started = time.time()
-    try:
-        result = subprocess.run(args, cwd=base_run_dir, env=env, capture_output=True, text=True, timeout=timeout_sec)
-        rc, stdout, stderr = result.returncode, result.stdout or "", result.stderr or ""
-    except subprocess.TimeoutExpired as te:
-        rc, stdout, stderr = -1, (te.stdout or ""), (te.stderr or "") + f"\n[ERROR] Timeout after {timeout_sec} sec"
-    except FileNotFoundError:
-        rc, stdout, stderr = 127, "", f"[ERROR] '{bin_name}' 바이너리를 찾을 수 없습니다. PATH/설치 상태 확인"
-    except Exception as e:
-        rc, stdout, stderr = 1, "", f"[ERROR] Unexpected: {e}"
-    duration_ms = int((time.time() - started) * 1000)
-
-    # 로그에 STDOUT/STDERR와 요약 기록
-    _log_write_text(log_path, "[STDOUT]\n" + (stdout or "") + "\n")
-    _log_write_text(log_path, "[STDERR]\n" + (stderr or "") + "\n")
-    _log_write_text(log_path, "-" * 80 + f"\n[RC] {rc}  [DURATION_MS] {duration_ms}\n")
+    # 동기 실행도 Popen + 실시간 TEE 로직 사용
+    rc, stdout_text, stderr_text, duration_ms = _run_with_live_logging(
+        args=args,
+        cwd=base_run_dir,
+        env=env,
+        timeout_sec=timeout_sec,
+        log_path=log_path,
+    )
 
     files = _list_files_under(out_dir)
     return {
@@ -585,13 +641,12 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "output_dir": os.path.relpath(out_dir, os.getcwd()),
         "rc": rc,
         "duration_ms": duration_ms,
-        "stdout": _clip(stdout),
-        "stderr": _clip(stderr),
-        "files": files,  # log.txt가 포함됨
+        "stdout": _clip(stdout_text),
+        "stderr": _clip(stderr_text),
+        "files": files,  # log.txt 포함
         "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
         "preinstall": preinstall_info,
     }
-
 # ---------- 스트리밍 ----------
 
 async def _aiter_stream_popen(cmd: list[str], cwd: str | None = None, env: dict | None = None, timeout: int | None = None):
