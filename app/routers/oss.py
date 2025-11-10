@@ -2,12 +2,14 @@
 # file: app/routers/oss.py
 # =========================
 from __future__ import annotations
+
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse, FileResponse
 import json
 from pathlib import Path
 from urllib.parse import quote
+from datetime import datetime
 
 from ..services.oss_service import (
     get_catalog as svc_get_catalog,
@@ -19,9 +21,17 @@ from ..services.oss_service import (
 
 router = APIRouter(prefix="/api/oss", tags=["oss"])
 
+# runs/<YYYYMM>/<uuid> 구조 가정
+RUNS_ROOT = Path("runs")
+
+
+# ---------------------------
+# 카탈로그 / 상세 / 시뮬레이션
+# ---------------------------
 @router.get("", summary="오픈소스 카탈로그 조회")
 def get_catalog(q: Optional[str] = Query(None, description="검색어 (선택)")) -> Dict[str, Any]:
     return svc_get_catalog(q)
+
 
 @router.get("/{code}", summary="오픈소스 상세 정보(정적)")
 def get_detail(code: str) -> Dict[str, Any]:
@@ -30,6 +40,7 @@ def get_detail(code: str) -> Dict[str, Any]:
         raise HTTPException(status_code=data.get("error", 400), detail=data.get("message", "Unknown error"))
     return data
 
+
 @router.post("/{code}/use", summary="오픈소스 '사용하기' 시뮬레이션 (명령만 생성)")
 def simulate_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     data = svc_simulate_use(code, payload or {})
@@ -37,8 +48,15 @@ def simulate_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise HTTPException(status_code=data.get("error", 400), detail=data.get("message", "Unknown error"))
     return data
 
+
+# ---------------------------
+# 파일 다운로드 URL 주입 헬퍼
+# ---------------------------
 def _augment_with_download_urls(resp: Dict[str, Any], request: Request) -> Dict[str, Any]:
-    """run 응답에 files[].download_url 추가."""
+    """
+    run 응답에 files[].download_url 추가.
+    * 주의: files[].path 는 download_file에서 run_dir 기준 상대 경로로 해석됨.
+    """
     try:
         run_dir = resp.get("run_dir")
         files = resp.get("files", [])
@@ -50,15 +68,21 @@ def _augment_with_download_urls(resp: Dict[str, Any], request: Request) -> Dict[
             url = str(request.url_for("download_file")) + f"?run_dir={quote(run_dir)}&path={quote(p)}"
             f["download_url"] = url
     except Exception:
+        # URL 주입에 실패해도 본문 자체는 반환
         pass
     return resp
 
+
+# ---------------------------
+# 실제 실행 (동기/스트림)
+# ---------------------------
 @router.post("/{code}/run", summary="오픈소스 실행 (실제 커맨드 실행 후 결과 반환)")
 def run_use(code: str, payload: Dict[str, Any], request: Request) -> Dict[str, Any]:
     data = svc_run_tool(code, payload or {})
     if "error" in data:
         raise HTTPException(status_code=data.get("error", 400), detail=data.get("message", "Unknown error"))
     return _augment_with_download_urls(data, request)
+
 
 @router.post("/{code}/run/stream", summary="오픈소스 실행 (실시간 스트림)")
 async def run_stream(code: str, request: Request) -> StreamingResponse:
@@ -79,13 +103,19 @@ async def run_stream(code: str, request: Request) -> StreamingResponse:
     gen = svc_iter_run_stream(code, payload or {})
     return StreamingResponse(gen, media_type="text/plain; charset=utf-8")
 
-# ---------- [NEW] 안전한 파일 다운로드 엔드포인트 ----------
+
+# ----------------------------------------
+# 안전한 파일 다운로드 엔드포인트 (고정 루트)
+# ----------------------------------------
 @router.get("/files", name="download_file", summary="실행 산출물 다운로드")
-def download_file(run_dir: str = Query(..., description="runs/... 하위 경로"),
-                  path: str = Query(..., description="run_dir 기준 상대 파일 경로")):
+def download_file(
+    run_dir: str = Query(..., description="runs/... 하위 경로"),
+    path: str = Query(..., description="run_dir 기준 상대 파일 경로"),
+):
     # runs 루트 고정
     runs_root = (Path.cwd() / "runs").resolve()
     base = (Path(run_dir)).resolve()
+
     # run_dir가 runs 하위인지 검사
     if not str(base).startswith(str(runs_root)):
         raise HTTPException(400, "invalid run_dir")
@@ -99,3 +129,142 @@ def download_file(run_dir: str = Query(..., description="runs/... 하위 경로"
 
     # 파일 다운로드
     return FileResponse(str(file_path), filename=file_path.name, media_type="application/octet-stream")
+
+
+# ---------------------------------------------------
+# [NEW] 최근 실행 결과(단건) 반환: /{code}/runs/latest
+# ---------------------------------------------------
+def _iter_run_dirs() -> list[Path]:
+    """runs/<YYYYMM>/<uuid> 를 최신순으로 나열 (로그/outputs mtime 기준)."""
+    if not RUNS_ROOT.exists():
+        return []
+    dirs: list[Path] = []
+    for month_dir in sorted(RUNS_ROOT.iterdir()):
+        if not month_dir.is_dir():
+            continue
+        for run_dir in month_dir.iterdir():
+            if run_dir.is_dir():
+                dirs.append(run_dir)
+
+    def key(p: Path) -> float:
+        outdir = p / "outputs"
+        logf = outdir / "log.txt"
+        if logf.exists():
+            return logf.stat().st_mtime
+        if outdir.exists():
+            return outdir.stat().st_mtime
+        return p.stat().st_mtime
+
+    dirs.sort(key=key, reverse=True)
+    return dirs
+
+
+def _collect_files_for_run(run_dir: Path) -> list[dict[str, Any]]:
+    """
+    run_dir/outputs 하위 파일을 스캔하여 files 배열 생성.
+    download_file 엔드포인트가 run_dir 기준 상대경로를 요구하므로,
+    path는 반드시 run_dir 기준으로 계산(= 'outputs/...' 포함)한다.
+    """
+    output_dir = run_dir / "outputs"
+    files: list[dict[str, Any]] = []
+    if not output_dir.exists():
+        return files
+
+    for p in output_dir.rglob("*"):
+        if p.is_file():
+            # run_dir 기준 상대경로
+            rel = p.relative_to(run_dir)
+            files.append(
+                {
+                    "path": str(rel.as_posix()),  # 예: outputs/log.txt, outputs/compliance/....
+                    "size": p.stat().st_size,
+                    "mtime": int(p.stat().st_mtime),
+                }
+            )
+    return files
+
+
+def _load_result_from_json(run_dir: Path) -> Optional[dict[str, Any]]:
+    """run_dir/result.json 이 있으면 로드."""
+    f = run_dir / "result.json"
+    if f.exists():
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
+def _guess_code_from_files(files: list[dict[str, Any]]) -> Optional[str]:
+    """파일 패턴으로 code 추정 (간단 휴리스틱)."""
+    for f in files:
+        path = f.get("path", "")
+        if "prowler-output" in path:
+            return "prowler"
+    return None
+
+
+def _read_tail(path: Path, max_bytes: int = 64 * 1024) -> str:
+    """로그 마지막 일부만 읽어 요약 STDOUT로 제공."""
+    try:
+        if not path.exists():
+            return ""
+        data = path.read_bytes()
+        if len(data) > max_bytes:
+            return data[-max_bytes :].decode(errors="ignore")
+        return data.decode(errors="ignore")
+    except Exception:
+        return ""
+
+
+def _build_summary_from_fs(run_dir: Path, code_hint: Optional[str]) -> dict[str, Any]:
+    """
+    result.json이 없는 실행 디렉토리에 대해 파일시스템을 스캔해
+    최소 정보(로그 tail, 파일 목록)를 구성.
+    """
+    output_dir = run_dir / "outputs"
+    log_tail = _read_tail(output_dir / "log.txt")
+
+    files = _collect_files_for_run(run_dir)
+    code = code_hint or _guess_code_from_files(files) or "unknown"
+
+    return {
+        "code": code,
+        "command": None,
+        "run_dir": str(run_dir.as_posix()),
+        "output_dir": str(output_dir.as_posix()),
+        "rc": None,
+        "duration_ms": None,
+        "stdout": log_tail,  # 콘솔 감성으로 tail 제공
+        "stderr": "",
+        "files": files,
+        "note": "result.json이 없어 파일시스템을 스캔해 구성한 요약 응답입니다.",
+        "preinstall": None,
+    }
+
+
+@router.get("/{code}/runs/latest", summary="가장 최근 실행 결과(단건)를 반환")
+def get_latest_run(code: str, request: Request) -> Dict[str, Any]:
+    """
+    - runs/<YYYYMM>/<uuid>/ 하위에서 가장 최근 실행을 찾아 반환
+    - result.json이 있으면 그대로 사용, 없으면 FS 스캔 요약
+    - 반환 직전 files[].download_url 을 주입
+    """
+    run_dirs = _iter_run_dirs()
+    if not run_dirs:
+        raise HTTPException(404, "No runs found")
+
+    # 1) result.json의 code 일치 우선
+    for run_dir in run_dirs:
+        saved = _load_result_from_json(run_dir)
+        if saved and saved.get("code") == code:
+            return _augment_with_download_urls(saved, request)
+
+    # 2) 파일 패턴으로 code 추정
+    for run_dir in run_dirs:
+        summary = _build_summary_from_fs(run_dir, code_hint=None)
+        if summary.get("code") == code:
+            return _augment_with_download_urls(summary, request)
+
+    # 3) 그래도 없으면 404
+    raise HTTPException(404, f"No recent runs for code={code}")
