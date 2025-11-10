@@ -781,3 +781,127 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
     }}
     yield b"\n===== [STEP] summary =====\n"
     yield (json.dumps(tail, ensure_ascii=False) + "\n").encode()
+
+def _run_custodian_with_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    전달받은 YAML 정책 파일을 실제 custodian CLI로 실행.
+    - payload["policy"]: YAML 파일 경로
+    - payload["output"]: 출력 디렉토리 (없으면 ./outputs)
+    """
+    base_run_dir = _safe_run_dir("./runs")
+    out_dir = _sanitize_subdir(base_run_dir, payload.get("output"))
+    policy_path = payload.get("policy")
+    if not policy_path:
+        return {"error": 400, "message": "policy is required"}
+
+    # 기본 args 구성
+    args = ["custodian", "run", "-s", out_dir, policy_path]
+    if (r := payload.get("region")):
+        args += ["-r", str(r)]
+
+    env = os.environ.copy()
+    if payload.get("profile"):
+        env["AWS_PROFILE"] = str(payload["profile"])  # AWS Profile 전달
+
+    # timeout 파싱
+    try:
+        timeout_sec = int(str(payload.get("timeout_sec", "1200")))
+    except ValueError:
+        timeout_sec = 1200
+
+    # 로그 경로
+    log_path = os.path.join(out_dir, "log.txt")
+
+    # custodian 바이너리 존재/설치 체크
+    preinstall = ensure_tool_extended("custodian", "c7n", True, None, None)
+
+    rc, stdout_text, stderr_text, duration_ms = _run_with_live_logging(
+        args=args,
+        cwd=base_run_dir,
+        env=env,
+        timeout_sec=timeout_sec,
+        log_path=log_path,
+    )
+
+    files = _list_files_under(out_dir)
+    return {
+        "code": "custodian",
+        "command": " ".join(shlex.quote(x) for x in args),
+        "run_dir": os.path.relpath(base_run_dir, os.getcwd()),
+        "output_dir": os.path.relpath(out_dir, os.getcwd()),
+        "rc": rc,
+        "duration_ms": duration_ms,
+        "stdout": _clip(stdout_text),
+        "stderr": _clip(stderr_text),
+        "files": files,
+        "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
+        "preinstall": preinstall,
+    }
+
+
+# run_tool에 custodian 분기 추가
+def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    # custodian 요청일 경우 별도 실행 루틴으로 분기
+    if code == "custodian":
+        return _run_custodian_with_payload(payload)
+
+    # === 기존 run_tool 본문 그대로 ===
+    item = get_item_by_code(code)
+    if not item:
+        return {"error": 404, "message": f"'{code}' 항목을 찾을 수 없습니다."}
+
+    base_run_dir = _safe_run_dir("./runs")
+    out_dir = _sanitize_subdir(base_run_dir, payload.get("output"))
+    payload = dict(payload or {})
+    if "output" in payload and payload["output"]:
+        payload["output"] = out_dir
+
+    pip_install_flag = str(payload.get("pip_install","true")).lower() == "true"
+    pip_index_url = payload.get("pip_index_url") or None
+    pip_extra_args = payload.get("pip_extra_args") or None
+
+    if code not in TOOLS:
+        return {"error": 400, "message": f"Unsupported tool: {code}"}
+    tool_meta = TOOLS[code]
+    bin_name, pip_pkg, install_cmds = tool_meta["bin"], tool_meta.get("pip"), tool_meta.get("install_cmds")
+
+    preinstall_info = ensure_tool_extended(bin_name, pip_pkg, pip_install_flag, pip_index_url, pip_extra_args, install_cmds=install_cmds)
+
+    env = os.environ.copy()
+    if payload.get("profile"):
+        env["AWS_PROFILE"] = str(payload["profile"])
+
+    try:
+        timeout_sec = int(str(payload.get("timeout_sec", "600")))
+    except ValueError:
+        timeout_sec = 600
+
+    try:
+        args = _build_command_for(code, payload)
+    except Exception as e:
+        return {"error": 400, "message": f"Invalid options: {e}", "preinstall": preinstall_info}
+
+    log_path = os.path.join(out_dir, "log.txt")
+
+    rc, stdout_text, stderr_text, duration_ms = _run_with_live_logging(
+        args=args,
+        cwd=base_run_dir,
+        env=env,
+        timeout_sec=timeout_sec,
+        log_path=log_path,
+    )
+
+    files = _list_files_under(out_dir)
+    return {
+        "code": code,
+        "command": " ".join(shlex.quote(x) for x in args),
+        "run_dir": os.path.relpath(base_run_dir, os.getcwd()),
+        "output_dir": os.path.relpath(out_dir, os.getcwd()),
+        "rc": rc,
+        "duration_ms": duration_ms,
+        "stdout": _clip(stdout_text),
+        "stderr": _clip(stderr_text),
+        "files": files,
+        "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
+        "preinstall": preinstall_info,
+    }
