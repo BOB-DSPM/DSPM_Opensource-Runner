@@ -16,6 +16,17 @@ import platform
 import shutil
 
 from ..utils.loader import list_items, get_item_by_code, merge
+from datetime import datetime
+
+def _log_write_text(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8", errors="ignore") as f:
+        f.write(text)
+
+def _log_write_bytes(path: str, b: bytes) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "ab") as f:
+        f.write(b)
 
 # ---------- 내부 헬퍼 (공통) ----------
 
@@ -501,7 +512,6 @@ def simulate_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"code": code, "name": item.get("name"), "simulate": True, "command": command, "note": "명령만 생성, 실행은 하지 않음"}
 
 # ---------- 서비스 API(실행) ----------
-
 def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     item = get_item_by_code(code)
     if not item:
@@ -539,6 +549,17 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"error": 400, "message": f"Invalid options: {e}", "preinstall": preinstall_info}
 
+    # --- 여기서부터 log.txt 작성 ---
+    log_path = os.path.join(out_dir, "log.txt")
+    started_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    header = []
+    header.append(f"[START] {started_dt}")
+    header.append(f"[CWD]   {os.path.abspath(base_run_dir)}")
+    header.append(f"[ENV]   AWS_PROFILE={env.get('AWS_PROFILE','')}")
+    header.append(f"[CMD]   {' '.join(shlex.quote(x) for x in args)}")
+    header.append("-" * 80 + "\n")
+    _log_write_text(log_path, "\n".join(header) + "\n")
+
     started = time.time()
     try:
         result = subprocess.run(args, cwd=base_run_dir, env=env, capture_output=True, text=True, timeout=timeout_sec)
@@ -551,6 +572,11 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         rc, stdout, stderr = 1, "", f"[ERROR] Unexpected: {e}"
     duration_ms = int((time.time() - started) * 1000)
 
+    # 로그에 STDOUT/STDERR와 요약 기록
+    _log_write_text(log_path, "[STDOUT]\n" + (stdout or "") + "\n")
+    _log_write_text(log_path, "[STDERR]\n" + (stderr or "") + "\n")
+    _log_write_text(log_path, "-" * 80 + f"\n[RC] {rc}  [DURATION_MS] {duration_ms}\n")
+
     files = _list_files_under(out_dir)
     return {
         "code": code,
@@ -561,7 +587,7 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "duration_ms": duration_ms,
         "stdout": _clip(stdout),
         "stderr": _clip(stderr),
-        "files": files,
+        "files": files,  # log.txt가 포함됨
         "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
         "preinstall": preinstall_info,
     }
