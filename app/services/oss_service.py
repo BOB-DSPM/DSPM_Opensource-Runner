@@ -18,6 +18,23 @@ import shutil
 from ..utils.loader import list_items, get_item_by_code, merge
 from datetime import datetime
 
+def _split_vals(v: Any) -> List[str]:
+    """list 또는 콤마 문자열 -> 공백 분리 토큰 리스트"""
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    s = str(v).strip()
+    if not s:
+        return []
+    # 콤마/공백 모두 허용
+    parts = []
+    for p in s.replace(",", " ").split():
+        p = p.strip()
+        if p:
+            parts.append(p)
+    return parts
+
 def _log_write_text(path: str, text: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     # 매 호출마다 open → write → close 하여 즉시 디스크 반영
@@ -279,31 +296,50 @@ def _build_prowler_args(payload: Dict[str, Any]) -> List[str]:
     provider = str(payload.get("provider", "aws")).strip()
     if provider not in {"aws","azure","gcp","kubernetes","github","m365","oci","nhn"}:
         raise ValueError(f"Unsupported provider: {provider}")
+
     args: List[str] = ["prowler", provider]
 
+    # list 모드
     if (m := payload.get("list")) in {"checks","services","compliance","categories"}:
         args += [f"--list-{m}"]
-    if provider == "aws" and (r := payload.get("region")):
-        args += ["--regions", str(r)]
-    if (sv := _join_csv(payload.get("services"))):   args += ["--services", sv]
-    if (ck := _join_csv(payload.get("checks"))):     args += ["--checks", ck]
-    if (cp := _join_csv(payload.get("compliance"))): args += ["--compliance", cp]
-    if (sev := payload.get("severity")):             args += ["--severity", str(sev)]
 
-    # 포맷 지정: --output-formats(복수) 우선, 없으면 단일 --output
+    # region: 최신 prowler는 --region (단수)
+    if provider == "aws" and (r := payload.get("region")):
+        args += ["--region", str(r)]
+
+    # 다중 값 옵션들은 공백 분리로 전달
+    services = _split_vals(payload.get("services"))
+    if services:
+        args += ["--service"] + services
+
+    checks = _split_vals(payload.get("checks"))
+    if checks:
+        args += ["--check"] + checks
+
+    compliances = _split_vals(payload.get("compliance"))
+    if compliances:
+        args += ["--compliance"] + compliances
+
+    if (sev := payload.get("severity")):
+        # 여러 값을 지원하므로 안전하게 분리
+        sevs = _split_vals(sev)
+        if sevs:
+            args += ["--severity"] + sevs
+
+    # 출력 포맷: --output-formats 는 공백 분리 나열
     ofmts = payload.get("output_formats")
     if ofmts:
-        if isinstance(ofmts, list):
-            args += ["--output-formats", ",".join([str(x) for x in ofmts if str(x).strip()])]
-        else:
-            args += ["--output-formats", str(ofmts)]
+        vals = _split_vals(ofmts)
+        if vals:
+            args += ["--output-formats"] + vals
     elif (fmt := payload.get("format")):
-        # 일부 버전은 --output 또는 --output-format 을 사용, 호환을 위해 --output 우선
-        args += ["--output", str(fmt)]
+        # 단일 포맷이 들어오면 동일 플래그로 1개만 전달
+        args += ["--output-formats", str(fmt)]
 
     # 출력 디렉터리
     if (out := payload.get("output")):
         args += ["--output-directory", str(out)]
+
     return args
 
 
