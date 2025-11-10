@@ -18,10 +18,12 @@ import shutil
 from ..utils.loader import list_items, get_item_by_code, merge
 from datetime import datetime
 
-# ------------------------------ 공통 유틸 ------------------------------
+# ──────────────────────────────────────────────────────────────
+# 상수/공통
+# ──────────────────────────────────────────────────────────────
+LATEST_DIR = "./runs/_latest"
 
 def _split_vals(v: Any) -> List[str]:
-    """list 또는 콤마 문자열 -> 공백 분리 토큰 리스트"""
     if v is None:
         return []
     if isinstance(v, (list, tuple)):
@@ -38,7 +40,6 @@ def _split_vals(v: Any) -> List[str]:
 
 def _log_write_text(path: str, text: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    # 매 호출마다 open → write → close 하여 즉시 디스크 반영
     with open(path, "a", encoding="utf-8", errors="ignore") as f:
         f.write(text)
 
@@ -48,10 +49,6 @@ def _log_write_bytes(path: str, b: bytes) -> None:
         f.write(b)
 
 def _run_with_live_logging(args: List[str], cwd: Optional[str], env: Dict[str, str], timeout_sec: int, log_path: str) -> tuple[int, str, str, int]:
-    """
-    subprocess.Popen으로 stdout/stderr(merged)를 실시간으로 log.txt에 TEE.
-    반환: (rc, stdout_text, stderr_text(빈문자열), duration_ms)
-    """
     started = time.time()
     started_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     header = []
@@ -68,23 +65,20 @@ def _run_with_live_logging(args: List[str], cwd: Optional[str], env: Dict[str, s
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1,  # line-buffered
+        bufsize=1,
     )
 
     collected_stdout: List[str] = []
-    timed_out = False
-
     try:
         assert proc.stdout is not None
         while True:
             line = proc.stdout.readline()
             if not line:
                 break
-            _log_write_text(log_path, line)  # 즉시 디스크 반영
+            _log_write_text(log_path, line)
             collected_stdout.append(line)
 
             if timeout_sec and (time.time() - started) > timeout_sec:
-                timed_out = True
                 try:
                     proc.kill()
                 except ProcessLookupError:
@@ -94,7 +88,6 @@ def _run_with_live_logging(args: List[str], cwd: Optional[str], env: Dict[str, s
 
         rc = proc.wait(timeout=1)
     except subprocess.TimeoutExpired:
-        timed_out = True
         try:
             proc.kill()
         except ProcessLookupError:
@@ -107,8 +100,7 @@ def _run_with_live_logging(args: List[str], cwd: Optional[str], env: Dict[str, s
 
     duration_ms = int((time.time() - started) * 1000)
     _log_write_text(log_path, "-" * 80 + f"\n[RC] {rc}  [DURATION_MS] {duration_ms}\n")
-
-    stdout_text = "".join(collected_stdout)  # stderr 병합
+    stdout_text = "".join(collected_stdout)
     return rc, stdout_text, "", duration_ms
 
 def _join_csv(v: Any) -> Optional[str]:
@@ -160,8 +152,48 @@ def _clip(s: str, limit: int = 200_000) -> str:
         return s[:limit] + f"\n...[truncated {len(s)-limit} bytes]"
     return s
 
-# ------------------------------ 설치/체크 유틸 ------------------------------
+# ──────────────────────────────────────────────────────────────
+# 최근 실행 포인터 관리
+# ──────────────────────────────────────────────────────────────
+def _record_last_run(code: str, run_dir: str, output_dir: str) -> None:
+    """./runs/_latest/<code>.json 에 최근 실행 포인터 저장"""
+    try:
+        os.makedirs(LATEST_DIR, exist_ok=True)
+        data = {
+            "code": code,
+            "ts": int(time.time()),
+            "run_dir": os.path.relpath(run_dir, os.getcwd()),
+            "output_dir": os.path.relpath(output_dir, os.getcwd()),
+        }
+        with open(os.path.join(LATEST_DIR, f"{code}.json"), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
+def _load_last_run(code: str) -> Optional[Dict[str, Any]]:
+    """최근 실행 포인터를 읽어 output_dir 및 파일 목록을 리턴"""
+    try:
+        path = os.path.join(LATEST_DIR, f"{code}.json")
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        out_dir = meta.get("output_dir")
+        if not out_dir:
+            return None
+        out_abs = os.path.abspath(out_dir)
+        if not os.path.isdir(out_abs):
+            return None
+        files = _list_files_under(out_abs)
+        meta["files"] = files
+        meta["output_dir"] = out_dir  # 상대경로 유지
+        return meta
+    except Exception:
+        return None
+
+# ──────────────────────────────────────────────────────────────
+# 설치/체크 유틸
+# ──────────────────────────────────────────────────────────────
 def _check_bin_exists(bin_name: str) -> Dict[str, Any]:
     try:
         res = subprocess.run([bin_name, "--version"], capture_output=True, text=True, timeout=30)
@@ -231,8 +263,9 @@ def ensure_tool_extended(
 
     return {"checked_before": pre, "installed": False, "check_after": pre, "pip_log": pip_log, "bin_install_log": bin_install_log}
 
-# ------------------------------ detail 템플릿 ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# detail 템플릿
+# ──────────────────────────────────────────────────────────────
 def _detail_template(defaults: Dict[str, Any], options: List[Dict[str, Any]], cli_examples: List[str], run_endpoint_code: str) -> Dict[str, Any]:
     meta = defaults
     return {
@@ -247,8 +280,9 @@ def _detail_template(defaults: Dict[str, Any], options: List[Dict[str, Any]], cl
         },
     }
 
-# ------------------------------ Prowler ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# Prowler
+# ──────────────────────────────────────────────────────────────
 def _prowler_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge({
         "code": "prowler",
@@ -288,7 +322,6 @@ def _build_prowler_args(payload: Dict[str, Any]) -> List[str]:
     provider = str(payload.get("provider", "aws")).strip()
     if provider not in {"aws","azure","gcp","kubernetes","github","m365","oci","nhn"}:
         raise ValueError(f"Unsupported provider: {provider}")
-
     args: List[str] = ["prowler", provider]
 
     if (m := payload.get("list")) in {"checks","services","compliance","categories"}:
@@ -324,11 +357,11 @@ def _build_prowler_args(payload: Dict[str, Any]) -> List[str]:
 
     if (out := payload.get("output")):
         args += ["--output-directory", str(out)]
-
     return args
 
-# ------------------------------ Checkov ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# Checkov
+# ──────────────────────────────────────────────────────────────
 def _checkov_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge({
         "code": "checkov",
@@ -363,8 +396,9 @@ def _build_checkov_args(payload: Dict[str, Any]) -> List[str]:
     args += ["-o", str(payload.get("output","json"))]
     return args
 
-# ------------------------------ Trivy ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# Trivy
+# ──────────────────────────────────────────────────────────────
 def _trivy_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge({
         "code": "trivy",
@@ -396,8 +430,9 @@ def _build_trivy_args(payload: Dict[str, Any]) -> List[str]:
     if (sev := payload.get("severity")): args += ["--severity", str(sev)]
     return args
 
-# ------------------------------ Gitleaks ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# Gitleaks
+# ──────────────────────────────────────────────────────────────
 def _gitleaks_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge({
         "code": "gitleaks",
@@ -428,8 +463,9 @@ def _build_gitleaks_args(payload: Dict[str, Any]) -> List[str]:
     if (rp := payload.get("report")): args += ["-r", str(rp)]
     return args
 
-# ------------------------------ Custodian ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# Cloud Custodian
+# ──────────────────────────────────────────────────────────────
 def _custodian_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge({
         "code": "custodian",
@@ -441,7 +477,6 @@ def _custodian_detail(base: Dict[str, Any]) -> Dict[str, Any]:
         "license": "Apache-2.0",
     }, base or {})
     options = [
-        # 프론트에서 텍스트에어리어로 보낸 인라인 YAML은 policy_inline 키로 넘어온다고 가정
         {"key":"policy","label":"Policy YAML Path (optional)","type":"string","required":False,"placeholder":"./policies.yml"},
         {"key":"policy_inline","label":"Policy YAML (inline)","type":"string","required":False,"placeholder":"(텍스트로 붙여넣기)"},
         {"key":"output","label":"Output Dir","type":"string","required":False,"placeholder":"./outputs","default":"./outputs"},
@@ -461,7 +496,6 @@ def _build_custodian_args(payload: Dict[str, Any]) -> List[str]:
     if (r := payload.get("region")): args += ["-r", str(r)]
     return args
 
-# 인라인 텍스트가 있으면 무조건 out_dir/policies.yml 로 저장하고 payload['policy']에 설정
 def _ensure_inline_policy_to_outdir(payload: Dict[str, Any], out_dir: str) -> Dict[str, Any]:
     inline = payload.get("policy_inline") or payload.get("policy_text") or payload.get("policy_yaml")
     if inline:
@@ -471,14 +505,13 @@ def _ensure_inline_policy_to_outdir(payload: Dict[str, Any], out_dir: str) -> Di
             f.write(str(inline))
         payload["policy"] = policy_abs
         return payload
-
-    # 인라인이 없고 policy 경로가 상대라면 out_dir 기준으로 절대화(편의)
     if (p := payload.get("policy")) and not os.path.isabs(p):
         payload["policy"] = os.path.abspath(os.path.join(out_dir, p))
     return payload
 
-# ------------------------------ Steampipe ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# Steampipe
+# ──────────────────────────────────────────────────────────────
 def _steampipe_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge({
         "code": "steampipe",
@@ -513,8 +546,9 @@ def _build_steampipe_args(payload: Dict[str, Any]) -> List[str]:
         args += ["--export", "./outputs"]
     return args
 
-# ------------------------------ Scout Suite ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# Scout Suite
+# ──────────────────────────────────────────────────────────────
 def _scout_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge({
         "code": "scout",
@@ -545,8 +579,9 @@ def _build_scout_args(payload: Dict[str, Any]) -> List[str]:
     if (out := payload.get("output")): args += ["--report-dir", str(out)]
     return args
 
-# ------------------------------ 서비스 API (카탈로그/디테일/시뮬) ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# 카탈로그/디테일/시뮬
+# ──────────────────────────────────────────────────────────────
 def get_catalog(q: Optional[str] = None) -> Dict[str, Any]:
     items = list_items()
     if q:
@@ -567,9 +602,12 @@ def get_detail(code: str) -> Dict[str, Any]:
         "steampipe": _steampipe_detail,
         "scout": _scout_detail,
     }
-    if code in DETAIL:
-        return DETAIL[code](item)
-    return {**item, "detail": {"about": "이 항목은 아직 상세 템플릿이 없습니다.", "use_endpoint": None}}
+    base = DETAIL[code](item) if code in DETAIL else {**item, "detail": {"about": "이 항목은 아직 상세 템플릿이 없습니다.", "use_endpoint": None}}
+    # ▼ 최근 실행 정보 주입
+    recent = _load_last_run(code)
+    if recent:
+        base["recent"] = recent
+    return base
 
 def _build_command_for(code: str, payload: Dict[str, Any]) -> List[str]:
     BUILDERS: Dict[str, Callable[[Dict[str, Any]], List[str]]] = {
@@ -585,8 +623,9 @@ def _build_command_for(code: str, payload: Dict[str, Any]) -> List[str]:
         raise ValueError(f"Unsupported tool: {code}")
     return BUILDERS[code](payload)
 
-# ------------------------------ TOOLS 레지스트리 ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# TOOLS 레지스트리
+# ──────────────────────────────────────────────────────────────
 TOOLS: Dict[str, Dict[str, Any]] = {
     "prowler":  {"bin":"prowler",  "pip":"prowler", "install_cmds": None},
     "checkov":  {"bin":"checkov",  "pip":"checkov", "install_cmds": None},
@@ -603,8 +642,9 @@ TOOLS: Dict[str, Dict[str, Any]] = {
     "scout":    {"bin":"scout",    "pip":"ScoutSuite","install_cmds": None},
 }
 
-# ------------------------------ 시뮬레이트 ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# 시뮬레이트
+# ──────────────────────────────────────────────────────────────
 def simulate_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     item = get_item_by_code(code)
     if not item:
@@ -616,10 +656,11 @@ def simulate_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     command = " ".join(shlex.quote(x) for x in cmd_list)
     return {"code": code, "name": item.get("name"), "simulate": True, "command": command, "note": "명령만 생성, 실행은 하지 않음"}
 
-# ------------------------------ 동기 실행 (공통) ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# 동기 실행 (공통)
+# ──────────────────────────────────────────────────────────────
 def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    # custodian은 별도 루틴 사용 (인라인 저장 포함)
+    # custodian은 별도 루틴
     if code == "custodian":
         return _run_custodian_with_payload(payload)
 
@@ -664,6 +705,10 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     files = _list_files_under(out_dir)
+
+    # ▼ 최근 실행 포인터 저장
+    _record_last_run(code, base_run_dir, out_dir)
+
     return {
         "code": code,
         "command": " ".join(shlex.quote(x) for x in args),
@@ -678,8 +723,9 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "preinstall": preinstall_info,
     }
 
-# ------------------------------ 스트리밍 실행 ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# 스트리밍 실행
+# ──────────────────────────────────────────────────────────────
 async def _aiter_stream_popen(cmd: list[str], cwd: str | None = None, env: dict | None = None, timeout: int | None = None):
     proc = await asyncio.create_subprocess_exec(
         *cmd, cwd=cwd, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
@@ -732,16 +778,6 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
     pip_index_url = payload.get("pip_index_url") or None
     pip_extra_args = payload.get("pip_extra_args") or None
 
-    if pip_install_flag and pip_pkg:
-        yield f"===== [STEP] pip install {pip_pkg} =====\n".encode()
-        args = [sys.executable, "-m", "pip", "install", pip_pkg]
-        if pip_index_url:
-            args += ["--index-url", str(pip_index_url)]
-        if pip_extra_args:
-            args += shlex.split(pip_extra_args)
-        async for chunk in _aiter_stream_popen(args, env=env, timeout=900):
-            yield chunk
-
     if install_cmds:
         yield b"\n===== [STEP] install binary (apt/etc) =====\n"
         for cmd in install_cmds:
@@ -751,13 +787,13 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
         yield (f"\n[check_after] exists={chk.get('exists')} rc={chk.get('rc')}\n").encode()
 
     yield b"\n===== [STEP] check tool =====\n"
-    # custodian은 '--version' 미지원 → 'version' 서브커맨드 사용
     ver_cmd = [bin_name, "version"] if bin_name == "custodian" else [bin_name, "--version"]
     async for chunk in _aiter_stream_popen(ver_cmd, env=env, timeout=60):
         yield chunk
 
-    # --- 인라인 YAML이 오면 ./policies.yml 로 저장 ---
-    payload = _ensure_inline_policy_to_outdir(payload, out_dir)
+    # 인라인 YAML → policies.yml 저장
+    if code == "custodian":
+        payload = _ensure_inline_policy_to_outdir(payload, out_dir)
 
     try:
         args = _build_command_for(code, payload)
@@ -772,6 +808,10 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
     duration_ms = int((time.time() - start_ts) * 1000)
 
     files = _list_files_under(out_dir)
+
+    # ▼ 최근 실행 포인터 저장
+    _record_last_run(code, base_run_dir, out_dir)
+
     tail = {"summary": {
         "run_dir": os.path.relpath(base_run_dir, os.getcwd()),
         "output_dir": os.path.relpath(out_dir, os.getcwd()),
@@ -781,18 +821,14 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
     yield b"\n===== [STEP] summary =====\n"
     yield (json.dumps(tail, ensure_ascii=False) + "\n").encode()
 
-# ------------------------------ Custodian 전용 실행 ------------------------------
-
+# ──────────────────────────────────────────────────────────────
+# Custodian 전용 동기 실행
+# ──────────────────────────────────────────────────────────────
 def _run_custodian_with_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    전달받은 YAML 정책 파일을 실제 custodian CLI로 실행.
-    - 인라인(policy_inline|policy_text|policy_yaml) 있으면 out_dir/policies.yml로 저장해 사용
-    """
     base_run_dir = _safe_run_dir("./runs")
     out_dir = _sanitize_subdir(base_run_dir, payload.get("output"))
     payload = dict(payload or {})
 
-    # 인라인 → ./policies.yml 저장(고정), 상대경로 보정
     payload = _ensure_inline_policy_to_outdir(payload, out_dir)
 
     policy_path = payload.get("policy")
@@ -821,6 +857,10 @@ def _run_custodian_with_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     files = _list_files_under(out_dir)
+
+    # ▼ 최근 실행 포인터 저장
+    _record_last_run("custodian", base_run_dir, out_dir)
+
     return {
         "code": "custodian",
         "command": " ".join(shlex.quote(x) for x in args),
