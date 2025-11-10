@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 from datetime import datetime
-
+from mimetypes import guess_type
 from ..services.oss_service import (
     get_catalog as svc_get_catalog,
     get_detail as svc_get_detail,
@@ -268,3 +268,43 @@ def get_latest_run(code: str, request: Request) -> Dict[str, Any]:
 
     # 3) 그래도 없으면 404
     raise HTTPException(404, f"No recent runs for code={code}")
+
+@router.get("/files", name="download_file", summary="실행 산출물 다운로드")
+def download_file(
+    run_dir: str = Query(..., description="runs/... 또는 YYYYMM/uuid 형태도 허용"),
+    path: str = Query(..., description="run_dir 기준 상대 파일 경로 (예: outputs/xxx.csv)"),
+):
+    runs_root = (Path.cwd() / "runs").resolve()
+
+    # 1) run_dir 보정: 'runs/' 접두사가 없어도 허용
+    rd = run_dir.lstrip("/").replace("\\", "/")
+    if not rd.startswith("runs/"):
+        rd = f"runs/{rd}"
+
+    # 2) 항상 runs_root 기준으로 절대 경로 계산
+    base = (runs_root / Path(rd).relative_to("runs")).resolve()
+
+    # 3) runs 루트 밖 탈출 방지
+    if not str(base).startswith(str(runs_root)):
+        raise HTTPException(400, "invalid run_dir")
+
+    # 4) 파일 경로 조립 및 탈출 방지
+    file_path = (base / path).resolve()
+    if not str(file_path).startswith(str(base)):
+        raise HTTPException(400, "invalid path")
+    if not (file_path.exists() and file_path.is_file()):
+        raise HTTPException(404, "file not found")
+
+    # 5) MIME / 다운로드 정책
+    mime, _ = guess_type(str(file_path))
+    media_type = mime or "application/octet-stream"
+    # 보고서/텍스트 성격은 inline, 그 외는 attachment
+    inline_exts = {".html", ".htm", ".txt", ".log", ".csv", ".json"}
+    disp = "inline" if file_path.suffix.lower() in inline_exts else "attachment"
+
+    return FileResponse(
+        path=str(file_path),
+        filename=file_path.name,
+        media_type=media_type,
+        headers={"Content-Disposition": f'{disp}; filename="{file_path.name}"'}
+    )
