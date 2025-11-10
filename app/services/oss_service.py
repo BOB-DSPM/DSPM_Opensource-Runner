@@ -116,6 +116,7 @@ def _run_with_live_logging(args: List[str], cwd: Optional[str], env: Dict[str, s
     # 여기서는 stderr를 병합했으므로 빈 문자열 반환
     stdout_text = "".join(collected_stdout)
     return rc, stdout_text, "", duration_ms
+
 # ---------- 내부 헬퍼 (공통) ----------
 
 def _join_csv(v: Any) -> Optional[str]:
@@ -239,6 +240,39 @@ def ensure_tool_extended(
 
     return {"checked_before": pre, "installed": False, "check_after": pre, "pip_log": pip_log, "bin_install_log": bin_install_log}
 
+# ---------- custodian 전용: pipx 격리 설치 시도 후 pip 폴백 ----------
+
+def _ensure_custodian_isolated() -> Dict[str, Any]:
+    """
+    custodian(c7n)을 pipx로 격리 설치 시도. 실패 시 pip로 폴백.
+    prowler 등의 의존성과 충돌을 피하기 위함.
+    """
+    pre = _check_bin_exists("custodian")
+    if pre.get("exists"):
+        return {"checked_before": pre, "installed": False, "check_after": pre, "pipx_log": None, "pip_log": None}
+
+    pipx_log = None
+    try:
+        has_pipx = _check_bin_exists("pipx").get("exists", False)
+        if has_pipx:
+            res = subprocess.run(["pipx", "install", "c7n"], capture_output=True, text=True, timeout=900)
+            pipx_log = {
+                "cmd": "pipx install c7n",
+                "rc": res.returncode,
+                "stdout": res.stdout or "",
+                "stderr": res.stderr or "",
+            }
+            post = _check_bin_exists("custodian")
+            if post.get("exists", False):
+                return {"checked_before": pre, "installed": True, "check_after": post, "pipx_log": pipx_log, "pip_log": None}
+    except Exception as e:
+        pipx_log = {"cmd": "pipx install c7n", "rc": -1, "stdout": "", "stderr": str(e)}
+
+    # 폴백: 동일 venv에 pip 설치 (충돌 가능성 있지만 최후 수단)
+    pip_log = _pip_install("c7n", None, None, timeout=900)
+    post = _check_bin_exists("custodian")
+    return {"checked_before": pre, "installed": post.get("exists", False), "check_after": post, "pipx_log": pipx_log, "pip_log": pip_log}
+
 # ---------- detail (옵션 스키마) ----------
 
 def _detail_template(defaults: Dict[str, Any], options: List[Dict[str, Any]], cli_examples: List[str], run_endpoint_code: str) -> Dict[str, Any]:
@@ -254,6 +288,7 @@ def _detail_template(defaults: Dict[str, Any], options: List[Dict[str, Any]], cl
             "disclaimer": "※ 커맨드 실행은 서버에서 수행됩니다. 신뢰된 옵션만 허용됩니다.",
         },
     }
+
 # --- [PATCH] prowler detail 옵션에 output_formats 추가 ---
 def _prowler_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge({
@@ -341,7 +376,6 @@ def _build_prowler_args(payload: Dict[str, Any]) -> List[str]:
         args += ["--output-directory", str(out)]
 
     return args
-
 
 # ----- Checkov -----
 def _checkov_detail(base: Dict[str, Any]) -> Dict[str, Any]:
@@ -618,9 +652,13 @@ def simulate_use(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     command = " ".join(shlex.quote(x) for x in cmd_list)
     return {"code": code, "name": item.get("name"), "simulate": True, "command": command, "note": "명령만 생성, 실행은 하지 않음"}
 
+# ---------- 동기 실행 (실시간 log.txt TEE 포함) ----------
 
-# 기존 run_tool을 아래처럼 교체 (동기 실행에서도 log.txt에 실시간 기록)
 def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    # custodian 요청일 경우 별도 실행 루틴으로 분기 (pipx 격리 포함)
+    if code == "custodian":
+        return _run_custodian_with_payload(payload)
+
     item = get_item_by_code(code)
     if not item:
         return {"error": 404, "message": f"'{code}' 항목을 찾을 수 없습니다."}
@@ -683,6 +721,7 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
         "preinstall": preinstall_info,
     }
+
 # ---------- 스트리밍 ----------
 
 async def _aiter_stream_popen(cmd: list[str], cwd: str | None = None, env: dict | None = None, timeout: int | None = None):
@@ -737,29 +776,41 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
     pip_index_url = payload.get("pip_index_url") or None
     pip_extra_args = payload.get("pip_extra_args") or None
 
-    if pip_install_flag and pip_pkg:
-        yield f"===== [STEP] pip install {pip_pkg} =====\n".encode()
-        args = [sys.executable, "-m", "pip", "install", pip_pkg]
-        if pip_index_url:
-            args += ["--index-url", str(pip_index_url)]
-        if pip_extra_args:
-            args += shlex.split(pip_extra_args)
-        async for chunk in _aiter_stream_popen(args, env=env, timeout=900):
-            yield chunk
-
-    if install_cmds:
-        yield b"\n===== [STEP] install binary (apt/etc) =====\n"
-        for cmd in install_cmds:
-            async for chunk in _aiter_stream_popen(list(cmd), env=env, timeout=900):
+    # ----- 설치 단계 -----
+    if code == "custodian":
+        # custodian은 pipx 격리 우선
+        yield b"===== [STEP] ensure custodian (pipx first, then pip) =====\n"
+        info = _ensure_custodian_isolated()
+        yield (json.dumps(info, ensure_ascii=False) + "\n").encode()
+    else:
+        if pip_install_flag and pip_pkg:
+            yield f"===== [STEP] pip install {pip_pkg} =====\n".encode()
+            args = [sys.executable, "-m", "pip", "install", pip_pkg]
+            if pip_index_url:
+                args += ["--index-url", str(pip_index_url)]
+            if pip_extra_args:
+                args += shlex.split(pip_extra_args)
+            async for chunk in _aiter_stream_popen(args, env=env, timeout=900):
                 yield chunk
-        chk = _check_bin_exists(bin_name)
-        yield (f"\n[check_after] exists={chk.get('exists')} rc={chk.get('rc')}\n").encode()
 
+        if install_cmds:
+            yield b"\n===== [STEP] install binary (apt/etc) =====\n"
+            for cmd in install_cmds:
+                async for chunk in _aiter_stream_popen(list(cmd), env=env, timeout=900):
+                    yield chunk
+            chk = _check_bin_exists(bin_name)
+            yield (f"\n[check_after] exists={chk.get('exists')} rc={chk.get('rc')}\n").encode()
+
+    # ----- 버전 체크 -----
     yield b"\n===== [STEP] check tool =====\n"
-    ver_cmd = [bin_name, "--version"]
+    if bin_name == "custodian":
+        ver_cmd = [bin_name, "version"]  # custodian은 --version 미지원
+    else:
+        ver_cmd = [bin_name, "--version"]
     async for chunk in _aiter_stream_popen(ver_cmd, env=env, timeout=60):
         yield chunk
 
+    # ----- 커맨드 빌드 & 실행 -----
     try:
         args = _build_command_for(code, payload)
     except Exception as e:
@@ -781,6 +832,8 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
     }}
     yield b"\n===== [STEP] summary =====\n"
     yield (json.dumps(tail, ensure_ascii=False) + "\n").encode()
+
+# ---------- custodian 동기 실행 (pipx 격리 포함) ----------
 
 def _run_custodian_with_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -812,8 +865,8 @@ def _run_custodian_with_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     # 로그 경로
     log_path = os.path.join(out_dir, "log.txt")
 
-    # custodian 바이너리 존재/설치 체크
-    preinstall = ensure_tool_extended("custodian", "c7n", True, None, None)
+    # custodian 바이너리 존재/설치 체크 (pipx 격리 우선)
+    preinstall = _ensure_custodian_isolated()
 
     rc, stdout_text, stderr_text, duration_ms = _run_with_live_logging(
         args=args,
@@ -836,72 +889,4 @@ def _run_custodian_with_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "files": files,
         "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
         "preinstall": preinstall,
-    }
-
-
-# run_tool에 custodian 분기 추가
-def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    # custodian 요청일 경우 별도 실행 루틴으로 분기
-    if code == "custodian":
-        return _run_custodian_with_payload(payload)
-
-    # === 기존 run_tool 본문 그대로 ===
-    item = get_item_by_code(code)
-    if not item:
-        return {"error": 404, "message": f"'{code}' 항목을 찾을 수 없습니다."}
-
-    base_run_dir = _safe_run_dir("./runs")
-    out_dir = _sanitize_subdir(base_run_dir, payload.get("output"))
-    payload = dict(payload or {})
-    if "output" in payload and payload["output"]:
-        payload["output"] = out_dir
-
-    pip_install_flag = str(payload.get("pip_install","true")).lower() == "true"
-    pip_index_url = payload.get("pip_index_url") or None
-    pip_extra_args = payload.get("pip_extra_args") or None
-
-    if code not in TOOLS:
-        return {"error": 400, "message": f"Unsupported tool: {code}"}
-    tool_meta = TOOLS[code]
-    bin_name, pip_pkg, install_cmds = tool_meta["bin"], tool_meta.get("pip"), tool_meta.get("install_cmds")
-
-    preinstall_info = ensure_tool_extended(bin_name, pip_pkg, pip_install_flag, pip_index_url, pip_extra_args, install_cmds=install_cmds)
-
-    env = os.environ.copy()
-    if payload.get("profile"):
-        env["AWS_PROFILE"] = str(payload["profile"])
-
-    try:
-        timeout_sec = int(str(payload.get("timeout_sec", "600")))
-    except ValueError:
-        timeout_sec = 600
-
-    try:
-        args = _build_command_for(code, payload)
-    except Exception as e:
-        return {"error": 400, "message": f"Invalid options: {e}", "preinstall": preinstall_info}
-
-    log_path = os.path.join(out_dir, "log.txt")
-
-    rc, stdout_text, stderr_text, duration_ms = _run_with_live_logging(
-        args=args,
-        cwd=base_run_dir,
-        env=env,
-        timeout_sec=timeout_sec,
-        log_path=log_path,
-    )
-
-    files = _list_files_under(out_dir)
-    return {
-        "code": code,
-        "command": " ".join(shlex.quote(x) for x in args),
-        "run_dir": os.path.relpath(base_run_dir, os.getcwd()),
-        "output_dir": os.path.relpath(out_dir, os.getcwd()),
-        "rc": rc,
-        "duration_ms": duration_ms,
-        "stdout": _clip(stdout_text),
-        "stderr": _clip(stderr_text),
-        "files": files,
-        "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
-        "preinstall": preinstall_info,
     }
