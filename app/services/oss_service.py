@@ -9,19 +9,22 @@ import subprocess
 import sys
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Callable, Iterable
+from typing import Any, Dict, List, Optional, Callable, Iterable, Tuple
 import asyncio
 import json
 import platform
 import shutil
+from glob import glob
 
 from ..utils.loader import list_items, get_item_by_code, merge
 from datetime import datetime
+from pathlib import Path
 
 # ──────────────────────────────────────────────────────────────
 # 상수/공통
 # ──────────────────────────────────────────────────────────────
 LATEST_DIR = "./runs/_latest"
+RUNS_ROOT = "./runs"
 
 def _split_vals(v: Any) -> List[str]:
     if v is None:
@@ -135,7 +138,7 @@ def _list_files_under(path: str, max_items: int = 200) -> List[Dict[str, Any]]:
                     stat = os.stat(full)
                     rel = os.path.relpath(full, path)
                     items.append({
-                        "path": rel,
+                        "path": rel if rel.startswith("outputs/") else f"outputs/{rel}" if path.endswith("outputs") else rel,
                         "size": stat.st_size,
                         "mtime": int(stat.st_mtime),
                     })
@@ -153,7 +156,7 @@ def _clip(s: str, limit: int = 200_000) -> str:
     return s
 
 # ──────────────────────────────────────────────────────────────
-# 최근 실행 포인터 관리
+# 최근 실행 포인터/결과 관리
 # ──────────────────────────────────────────────────────────────
 def _record_last_run(code: str, run_dir: str, output_dir: str) -> None:
     """./runs/_latest/<code>.json 에 최근 실행 포인터 저장"""
@@ -190,6 +193,118 @@ def _load_last_run(code: str) -> Optional[Dict[str, Any]]:
         return meta
     except Exception:
         return None
+
+def _iter_result_jsons() -> List[Tuple[str, float]]:
+    """
+    runs/**/result.json 파일들을 (경로, mtime) 리스트로 반환 (최신순).
+    """
+    results: List[Tuple[str, float]] = []
+    for path in glob(os.path.join(RUNS_ROOT, "*", "*", "result.json")):
+        try:
+            mt = os.path.getmtime(path)
+            results.append((path, mt))
+        except OSError:
+            continue
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
+
+def find_latest_result_for_code(code: str) -> Optional[Dict[str, Any]]:
+    """
+    요구사항 1:
+    - result.json에서 최근 실행을 확인하여 저장된 위치(run_dir/output_dir 포함)와 메타를 가져온다.
+    우선순위: runs/_latest 포인터 → runs/**/result.json 스캔
+    """
+    # 1) 포인터 파일 우선
+    pointer = _load_last_run(code)
+    if pointer:
+        # 포인터 기반으로 같은 run_dir의 result.json을 시도
+        rd = pointer.get("run_dir")
+        if rd:
+            res_path = os.path.join(rd, "result.json")
+            if os.path.isfile(res_path):
+                try:
+                    data = json.loads(open(res_path, "r", encoding="utf-8").read())
+                    return data
+                except Exception:
+                    pass
+        # 포인터만이라도 기초 메타 구성
+        return {
+            "code": code,
+            "run_dir": pointer.get("run_dir"),
+            "output_dir": pointer.get("output_dir"),
+            "files": pointer.get("files", []),
+            "note": "latest pointer를 기반으로 반환(결과 파일 파싱 실패 시)",
+        }
+
+    # 2) 전체 runs/**/result.json 스캔 (최신부터)
+    for res_path, _mt in _iter_result_jsons():
+        try:
+            with open(res_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("code") == code:
+                return data
+        except Exception:
+            continue
+    return None
+
+def collect_executed_contents(run_dir: Optional[str], output_dir: Optional[str], code: Optional[str]) -> Dict[str, Any]:
+    """
+    요구사항 2:
+    - '해당 파일에서 실행했던 내용들'을 모두 가져온다.
+    해석:
+      * 공통: outputs/log.txt 전체(클립) 및 실행 커맨드(result.json 내 command는 상위에서 제공됨)
+      * custodian: outputs/policies.yml(있으면) 원문도 포함
+    """
+    out = {}
+    try:
+        if not run_dir or not output_dir:
+            return out
+        # 경로 보정
+        rd_abs = os.path.abspath(run_dir)
+        out_abs = os.path.abspath(output_dir if os.path.isabs(output_dir) else os.path.join(run_dir, output_dir) if not output_dir.startswith("runs/") else output_dir)
+
+        # 로그
+        log_path = os.path.join(out_abs, "log.txt")
+        if os.path.isfile(log_path):
+            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                out["log_txt"] = _clip(f.read())
+
+        # custodian 정책 원문
+        if str(code).lower() == "custodian":
+            pol1 = os.path.join(out_abs, "policies.yml")
+            pol2 = os.path.join(out_abs, "policy.yml")
+            for p in (pol1, pol2):
+                if os.path.isfile(p):
+                    with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                        out["policy_yaml"] = _clip(f.read(), 500_000)
+                    break
+
+        # outputs 하위 텍스트 산출물들(소형)도 일부 수집 (최대 N개, 각 100KB)
+        collected_texts: Dict[str, str] = {}
+        MAX_FILES, MAX_BYTES = 10, 100_000
+        for dirpath, _, filenames in os.walk(out_abs):
+            for name in filenames:
+                path = os.path.join(dirpath, name)
+                rel = os.path.relpath(path, rd_abs)
+                # 텍스트로 보기 적합한 확장자만
+                if os.path.splitext(name)[1].lower() in {".txt", ".log", ".json", ".csv", ".yml", ".yaml"}:
+                    try:
+                        sz = os.path.getsize(path)
+                        if sz <= MAX_BYTES:
+                            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                                collected_texts[rel] = f.read()
+                            if len(collected_texts) >= MAX_FILES:
+                                break
+                    except Exception:
+                        continue
+            if len(collected_texts) >= MAX_FILES:
+                break
+        if collected_texts:
+            out["small_text_artifacts"] = collected_texts
+
+    except Exception:
+        pass
+    return out
 
 # ──────────────────────────────────────────────────────────────
 # 설치/체크 유틸
@@ -603,7 +718,7 @@ def get_detail(code: str) -> Dict[str, Any]:
         "scout": _scout_detail,
     }
     base = DETAIL[code](item) if code in DETAIL else {**item, "detail": {"about": "이 항목은 아직 상세 템플릿이 없습니다.", "use_endpoint": None}}
-    # ▼ 최근 실행 정보 주입
+    # ▼ 최근 실행 정보 주입 (포인터 기반 요약)
     recent = _load_last_run(code)
     if recent:
         base["recent"] = recent
@@ -709,6 +824,28 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     # ▼ 최근 실행 포인터 저장
     _record_last_run(code, base_run_dir, out_dir)
 
+    # result.json 저장 (최신 탐색 편의를 위해)
+    try:
+        result_path = os.path.join(base_run_dir, "result.json")
+        payload_redacted = {k: v for k, v in (payload or {}).items() if k not in {"policy_inline", "policy_text", "policy_yaml"}}
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "code": code,
+                "command": " ".join(shlex.quote(x) for x in args),
+                "run_dir": os.path.relpath(base_run_dir, os.getcwd()),
+                "output_dir": os.path.relpath(out_dir, os.getcwd()),
+                "rc": rc,
+                "duration_ms": duration_ms,
+                "stdout": _clip(stdout_text),
+                "stderr": _clip(stderr_text),
+                "files": files,
+                "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
+                "preinstall": preinstall_info,
+                "payload": payload_redacted,
+            }, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
     return {
         "code": code,
         "command": " ".join(shlex.quote(x) for x in args),
@@ -812,6 +949,28 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
     # ▼ 최근 실행 포인터 저장
     _record_last_run(code, base_run_dir, out_dir)
 
+    # result.json 저장 (스트리밍 모드도 동일하게)
+    try:
+        result_path = os.path.join(base_run_dir, "result.json")
+        payload_redacted = {k: v for k, v in (payload or {}).items() if k not in {"policy_inline", "policy_text", "policy_yaml"}}
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "code": code,
+                "command": " ".join(shlex.quote(x) for x in args),
+                "run_dir": os.path.relpath(base_run_dir, os.getcwd()),
+                "output_dir": os.path.relpath(out_dir, os.getcwd()),
+                "rc": None,  # 스트림에선 RC를 tail에서 제공하므로 생략/None
+                "duration_ms": duration_ms,
+                "stdout": "",
+                "stderr": "",
+                "files": files,
+                "note": "stream run summary",
+                "preinstall": None,
+                "payload": payload_redacted,
+            }, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
     tail = {"summary": {
         "run_dir": os.path.relpath(base_run_dir, os.getcwd()),
         "output_dir": os.path.relpath(out_dir, os.getcwd()),
@@ -860,6 +1019,28 @@ def _run_custodian_with_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # ▼ 최근 실행 포인터 저장
     _record_last_run("custodian", base_run_dir, out_dir)
+
+    # result.json 저장
+    try:
+        result_path = os.path.join(base_run_dir, "result.json")
+        payload_redacted = {k: v for k, v in (payload or {}).items() if k not in {"policy_inline", "policy_text", "policy_yaml"}}
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "code": "custodian",
+                "command": " ".join(shlex.quote(x) for x in args),
+                "run_dir": os.path.relpath(base_run_dir, os.getcwd()),
+                "output_dir": os.path.relpath(out_dir, os.getcwd()),
+                "rc": rc,
+                "duration_ms": duration_ms,
+                "stdout": _clip(stdout_text),
+                "stderr": _clip(stderr_text),
+                "files": files,
+                "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
+                "preinstall": preinstall,
+                "payload": payload_redacted,
+            }, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
     return {
         "code": "custodian",

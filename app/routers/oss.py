@@ -17,6 +17,8 @@ from ..services.oss_service import (
     simulate_use as svc_simulate_use,
     run_tool as svc_run_tool,
     iter_run_stream as svc_iter_run_stream,
+    find_latest_result_for_code as svc_find_latest_result_for_code,
+    collect_executed_contents as svc_collect_executed_contents,
 )
 
 router = APIRouter(prefix="/api/oss", tags=["oss"])
@@ -220,24 +222,28 @@ def download_file(
 @router.get("/{code}/runs/latest", summary="가장 최근 실행 결과(단건)를 반환")
 def get_latest_run(code: str, request: Request) -> Dict[str, Any]:
     """
-    - runs/<YYYYMM>/<uuid>/ 하위에서 가장 최근 실행을 찾아 반환
-    - result.json이 있으면 그대로 사용, 없으면 FS 스캔 요약
+    요구사항:
+    1) result.json에서 최근 실행을 우선 확인하여 저장된 위치(run_dir/output_dir)와 메타를 가져온다.
+    2) 해당 실행에서 사용된 파일/로그 등 '실행했던 내용들'을 함께 수집해 반환한다.
     - 반환 직전 files[].download_url 을 주입
     """
+    # 1) result.json 기반으로 최신 실행 탐색
+    latest = svc_find_latest_result_for_code(code)
+    if latest:
+        # 실행했던 내용(로그/정책 등) 수집
+        executed = svc_collect_executed_contents(latest.get("run_dir"), latest.get("output_dir"), latest.get("code"))
+        latest["executed"] = executed or {}
+        return _augment_with_download_urls(latest, request)
+
+    # 2) 폴백: 파일시스템만으로 최근 실행 요약
     run_dirs = _iter_run_dirs()
     if not run_dirs:
         raise HTTPException(404, "No runs found")
-
-    # 1) result.json의 code 일치 우선
-    for run_dir in run_dirs:
-        saved = _load_result_from_json(run_dir)
-        if saved and saved.get("code") == code:
-            return _augment_with_download_urls(saved, request)
-
-    # 2) 파일 패턴으로 code 추정
     for run_dir in run_dirs:
         summary = _build_summary_from_fs(run_dir, code_hint=None)
         if summary.get("code") == code:
+            executed = svc_collect_executed_contents(summary.get("run_dir"), summary.get("output_dir"), summary.get("code"))
+            summary["executed"] = executed or {}
             return _augment_with_download_urls(summary, request)
 
     # 3) 그래도 없으면 404
