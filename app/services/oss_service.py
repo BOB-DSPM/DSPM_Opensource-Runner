@@ -151,6 +151,8 @@ def _list_files_under(path: str, max_items: int = 200) -> List[Dict[str, Any]]:
     return items
 
 def _clip(s: str, limit: int = 200_000) -> str:
+    if s is None:
+        return ""
     if len(s) > limit:
         return s[:limit] + f"\n...[truncated {len(s)-limit} bytes]"
     return s
@@ -254,14 +256,20 @@ def collect_executed_contents(run_dir: Optional[str], output_dir: Optional[str],
     해석:
       * 공통: outputs/log.txt 전체(클립) 및 실행 커맨드(result.json 내 command는 상위에서 제공됨)
       * custodian: outputs/policies.yml(있으면) 원문도 포함
+      * outputs 하위 소형 텍스트 산출물도 일부 수집
     """
-    out = {}
+    out: Dict[str, Any] = {}
     try:
         if not run_dir or not output_dir:
             return out
         # 경로 보정
         rd_abs = os.path.abspath(run_dir)
-        out_abs = os.path.abspath(output_dir if os.path.isabs(output_dir) else os.path.join(run_dir, output_dir) if not output_dir.startswith("runs/") else output_dir)
+        if os.path.isabs(output_dir):
+            out_abs = output_dir
+        elif output_dir.startswith("runs/"):
+            out_abs = os.path.abspath(output_dir)
+        else:
+            out_abs = os.path.abspath(os.path.join(run_dir, output_dir))
 
         # 로그
         log_path = os.path.join(out_abs, "log.txt")
@@ -286,7 +294,6 @@ def collect_executed_contents(run_dir: Optional[str], output_dir: Optional[str],
             for name in filenames:
                 path = os.path.join(dirpath, name)
                 rel = os.path.relpath(path, rd_abs)
-                # 텍스트로 보기 적합한 확장자만
                 if os.path.splitext(name)[1].lower() in {".txt", ".log", ".json", ".csv", ".yml", ".yaml"}:
                     try:
                         sz = os.path.getsize(path)
@@ -915,16 +922,37 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
     pip_index_url = payload.get("pip_index_url") or None
     pip_extra_args = payload.get("pip_extra_args") or None
 
+    # 0) OS 패키지 설치 경로(trivy/gitleaks 등)
     if install_cmds:
-        yield b"\n===== [STEP] install binary (apt/etc) =====\n"
+        yield b"\n===== [STEP] ensure tool (apt/etc) =====\n"
         for cmd in install_cmds:
             async for chunk in _aiter_stream_popen(list(cmd), env=env, timeout=900):
                 yield chunk
         chk = _check_bin_exists(bin_name)
         yield (f"\n[check_after] exists={chk.get('exists')} rc={chk.get('rc')}\n").encode()
 
+    # 1) pip 기반 설치 경로(checkov/custodian/scout 등)도 스트리밍에서 보장
+    if (not install_cmds) and pip_pkg:
+        yield b"\n===== [STEP] ensure tool (pip) =====\n"
+        info = ensure_tool_extended(
+            bin_name=bin_name,
+            pip_pkg=pip_pkg,
+            pip_install=pip_install_flag,
+            index_url=pip_index_url,
+            extra_args=pip_extra_args,
+            install_cmds=None,
+        )
+        yield (json.dumps({"preinstall": info}, ensure_ascii=False) + "\n").encode()
+
+    # 2) 최종 실행 파일 확인(shutil.which) 및 해석된 경로 사용
+    resolved = shutil.which(bin_name)
+    if not resolved:
+        msg = f"'{bin_name}' executable not found in PATH after ensure. Please check installation."
+        yield (f'\n{{"error":127,"message":"{msg}"}}\n').encode()
+        return
+
     yield b"\n===== [STEP] check tool =====\n"
-    ver_cmd = [bin_name, "version"] if bin_name == "custodian" else [bin_name, "--version"]
+    ver_cmd = [resolved, "version"] if bin_name == "custodian" else [resolved, "--version"]
     async for chunk in _aiter_stream_popen(ver_cmd, env=env, timeout=60):
         yield chunk
 
@@ -938,6 +966,8 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
         yield (f'\n{{"error":400,"message":"Invalid options: {e}"}}\n').encode(); return
 
     yield b"\n===== [STEP] run =====\n"
+    # 실행 시에도 해석된 경로 사용
+    args[0] = resolved
     yield (f"$ {' '.join(shlex.quote(x) for x in args)}\n").encode()
     start_ts = time.time()
     async for chunk in _aiter_stream_popen(args, cwd=base_run_dir, env=env, timeout=timeout_sec):
