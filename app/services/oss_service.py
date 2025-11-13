@@ -16,6 +16,7 @@ import shutil
 from glob import glob
 from datetime import datetime
 from pathlib import Path
+import zipfile  # ScoutSuite 리포트 zip 생성을 위해 추가
 
 from ..utils.loader import list_items, get_item_by_code, merge
 
@@ -169,6 +170,67 @@ def _clip(s: str, limit: int = 200_000) -> str:
     if len(s) > limit:
         return s[:limit] + f"\n...[truncated {len(s)-limit} bytes]"
     return s
+
+
+# ──────────────────────────────────────────────────────────────
+# ScoutSuite 리포트 zip 생성 유틸
+# ──────────────────────────────────────────────────────────────
+def _maybe_add_scout_zip(out_dir: str, files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    out_dir 아래에 scoutsuite-report* 디렉터리가 있으면
+    동일 위치에 scoutsuite-report-*.zip 을 생성하고 files 리스트에 추가.
+    """
+    try:
+        if not os.path.isdir(out_dir):
+            return files
+
+        report_dir = None
+        for name in os.listdir(out_dir):
+            full = os.path.join(out_dir, name)
+            if os.path.isdir(full) and name.startswith("scoutsuite-report"):
+                report_dir = full
+                zip_name = f"{name}.zip"
+                zip_path = os.path.join(out_dir, zip_name)
+                # zip 파일이 이미 있으면 그대로 사용
+                if not os.path.exists(zip_path):
+                    os.makedirs(os.path.dirname(zip_path), exist_ok=True)
+                    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                        for dirpath, _, filenames in os.walk(report_dir):
+                            for fname in filenames:
+                                f_full = os.path.join(dirpath, fname)
+                                # zip 내부 경로는 out_dir 기준 상대 경로
+                                arcname = os.path.relpath(f_full, out_dir)
+                                zf.write(f_full, arcname)
+                # files 목록에 zip 항목 추가
+                stat = os.stat(zip_path)
+                rel = os.path.relpath(zip_path, out_dir)
+                path_val = (
+                    rel
+                    if rel.startswith("outputs/")
+                    else f"outputs/{rel}"
+                    if out_dir.endswith("outputs")
+                    else rel
+                )
+                # 중복 방지
+                if not any(f.get("path") == path_val for f in files):
+                    files.append(
+                        {
+                            "path": path_val,
+                            "size": stat.st_size,
+                            "mtime": int(stat.st_mtime),
+                        }
+                    )
+                break
+    except Exception as e:
+        # zip 생성 실패해도 전체 실행에는 영향 없이 로그만 남김
+        try:
+            _log_write_text(
+                os.path.join(out_dir, "log.txt"),
+                f"\n[WARN] scout zip create failed: {e}\n",
+            )
+        except Exception:
+            pass
+    return files
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1418,6 +1480,11 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     files = _list_files_under(out_dir)
+
+    # ScoutSuite 결과 폴더를 zip으로 묶어 files에 추가
+    if code == "scout":
+        files = _maybe_add_scout_zip(out_dir, files)
+
     _record_last_run(code, base_run_dir, out_dir)
 
     try:
@@ -1618,6 +1685,11 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
     duration_ms = int((time.time() - start_ts) * 1000)
 
     files = _list_files_under(out_dir)
+
+    # 스트리밍 모드에서도 ScoutSuite 리포트 zip 추가
+    if code == "scout":
+        files = _maybe_add_scout_zip(out_dir, files)
+
     _record_last_run(code, base_run_dir, out_dir)
 
     try:
