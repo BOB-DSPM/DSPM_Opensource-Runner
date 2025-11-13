@@ -1,6 +1,6 @@
 # ============================================
 # file: app/services/evidence_report_service.py
-# (새 파일)
+# (한글 폰트 적용 버전)
 # ============================================
 from __future__ import annotations
 
@@ -9,19 +9,39 @@ import json
 import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-
 from pathlib import Path
 
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 from .oss_service import find_latest_result_for_code
 from ..utils.loader import get_item_by_code
 
+# ──────────────────────────────────────────────
+# 설정
+# ──────────────────────────────────────────────
 EVIDENCE_ROOT = "./runs/evidence_pdf"
 
+# 폰트 경로 (app/services 기준 ../fonts/GowunDodum-Regular.ttf)
+BASE_DIR = Path(__file__).resolve().parent
+FONT_PATH = BASE_DIR.parent / "fonts" / "GowunDodum-Regular.ttf"
 
+# 한글 폰트 등록
+KOREAN_FONT_NAME = "GowunDodum"
+
+try:
+    pdfmetrics.registerFont(TTFont(KOREAN_FONT_NAME, str(FONT_PATH)))
+except Exception as e:
+    # 실패해도 기본 폰트로라도 생성되도록만 함
+    print(f"[WARN] Failed to register Korean font '{KOREAN_FONT_NAME}': {e}")
+
+
+# ──────────────────────────────────────────────
+# 유틸 함수
+# ──────────────────────────────────────────────
 def _safe_evidence_dir(base_dir: str = EVIDENCE_ROOT) -> str:
     """PDF 보고서를 저장할 디렉터리 생성 (예: runs/evidence_pdf/20251113_153012)."""
     ts = time.strftime("%Y%m%d_%H%M%S")
@@ -56,9 +76,10 @@ def _wrap_text(text: str, max_chars: int) -> List[str]:
 
 
 def _draw_section_title(c: canvas.Canvas, text: str, x: float, y: float):
-    c.setFont("Helvetica-Bold", 14)
+    # 제목은 약간 크게
+    c.setFont(KOREAN_FONT_NAME, 14)
     c.drawString(x, y, text)
-    c.setFont("Helvetica", 10)
+    c.setFont(KOREAN_FONT_NAME, 10)
 
 
 def _draw_kv(c: canvas.Canvas, x: float, y: float, key: str, value: str) -> float:
@@ -68,10 +89,13 @@ def _draw_kv(c: canvas.Canvas, x: float, y: float, key: str, value: str) -> floa
     """
     max_chars = 90
     lines = _wrap_text(value, max_chars)
-    c.setFont("Helvetica-Bold", 9)
+
+    # key
+    c.setFont(KOREAN_FONT_NAME, 9)
     c.drawString(x, y, f"{key}:")
-    c.setFont("Helvetica", 9)
+    # value
     offset_x = x + 40  # value 들여쓰기
+    c.setFont(KOREAN_FONT_NAME, 9)
 
     first = True
     for line in lines:
@@ -103,6 +127,9 @@ def _summarize_files(files: List[Dict[str, Any]], max_files: int = 8) -> List[Di
     return sorted_files[:max_files]
 
 
+# ──────────────────────────────────────────────
+# 메인 함수
+# ──────────────────────────────────────────────
 def generate_evidence_pdf(
     codes: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
@@ -127,22 +154,29 @@ def generate_evidence_pdf(
     c = canvas.Canvas(pdf_path, pagesize=A4)
     width, height = A4
 
-    # 1. 표지/헤더
+    # ─ 1. 표지/헤더 ─────────────────────────────────
     margin_x = 20 * mm
     y = height - 30 * mm
 
-    c.setFont("Helvetica-Bold", 18)
+    # 제목
+    c.setFont(KOREAN_FONT_NAME, 18)
     c.drawString(margin_x, y, "SAGE OSS Evidence Report")
     y -= 15 * mm
 
-    c.setFont("Helvetica", 11)
+    # 생성 시각 / 범위
+    c.setFont(KOREAN_FONT_NAME, 11)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.drawString(margin_x, y, f"Generated at: {now_str}")
     y -= 8 * mm
-    c.drawString(margin_x, y, "Scope: Latest runs of Prowler / Cloud Custodian / Steampipe / Scout Suite")
+    c.drawString(
+        margin_x,
+        y,
+        "Scope: Latest runs of Prowler / Cloud Custodian / Steampipe / Scout Suite",
+    )
     y -= 15 * mm
 
-    c.setFont("Helvetica-Oblique", 9)
+    # 한글 설명
+    c.setFont(KOREAN_FONT_NAME, 9)
     c.drawString(
         margin_x,
         y,
@@ -153,7 +187,7 @@ def generate_evidence_pdf(
     c.showPage()
     y = height - 30 * mm
 
-    # 2. 각 Tool 섹션
+    # ─ 2. 각 Tool 섹션 ─────────────────────────────
     for code in codes:
         meta = find_latest_result_for_code(code)
         item = get_item_by_code(code) or {}
@@ -166,7 +200,7 @@ def generate_evidence_pdf(
         if not meta:
             # 실행 이력 없음
             y = _ensure_page_space(c, y)
-            _draw_section_title(c, f"[{tool_name}] (no recent run)", margin_x, y)
+            _draw_section_title(c, f"[{tool_name}] (최근 실행 없음)", margin_x, y)
             y -= 12 * mm
             y = _draw_kv(c, margin_x, y, "Status", "최근 실행 결과가 존재하지 않습니다.")
             y -= 5 * mm
@@ -176,7 +210,7 @@ def generate_evidence_pdf(
         _draw_section_title(c, f"[{tool_name}] {code}", margin_x, y)
         y -= 8 * mm
 
-        # 기본 메타 정보
+        # ─ 기본 메타 정보 ─
         y = _draw_kv(c, margin_x, y, "Category", tool_category or "-")
         y = _draw_kv(c, margin_x, y, "Homepage", tool_homepage or "-")
         if tool_desc:
@@ -184,7 +218,7 @@ def generate_evidence_pdf(
 
         y = _ensure_page_space(c, y)
 
-        # 실행 메타
+        # ─ 실행 메타 ─
         run_dir = meta.get("run_dir", "-")
         output_dir = meta.get("output_dir", "-")
         rc = meta.get("rc")
@@ -202,12 +236,12 @@ def generate_evidence_pdf(
         if note:
             y = _draw_kv(c, margin_x, y, "Note", note)
 
-        # 파일 요약 (상위 N개)
+        # ─ 파일 요약 (상위 N개) ─
         y = _ensure_page_space(c, y)
-        c.setFont("Helvetica-Bold", 10)
+        c.setFont(KOREAN_FONT_NAME, 10)
         c.drawString(margin_x, y, "Generated Artifacts (Top N)")
         y -= 6 * mm
-        c.setFont("Helvetica", 8)
+        c.setFont(KOREAN_FONT_NAME, 8)
 
         top_files = _summarize_files(files, max_files=8)
         if not top_files:
@@ -219,18 +253,23 @@ def generate_evidence_pdf(
                 path = str(f.get("path"))
                 size = f.get("size")
                 mtime = f.get("mtime")
-                size_kb = "-" if size is None else f"{round(size/1024, 1)} KB"
-                mtime_str = "-" if not mtime else datetime.fromtimestamp(mtime).strftime(
-                    "%Y-%m-%d %H:%M:%S"
+                size_kb = "-" if size is None else f"{round(size / 1024, 1)} KB"
+                mtime_str = (
+                    "-"
+                    if not mtime
+                    else datetime.fromtimestamp(mtime).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
                 )
 
-                # path + size/mtime 1~2줄
+                # path 줄바꿈
                 lines = _wrap_text(path, 90)
                 c.drawString(margin_x + 5 * mm, y, f"- {lines[0]}")
                 y -= 4 * mm
                 for extra in lines[1:]:
                     c.drawString(margin_x + 9 * mm, y, extra)
                     y -= 4 * mm
+
                 c.drawString(
                     margin_x + 9 * mm,
                     y,
@@ -242,13 +281,13 @@ def generate_evidence_pdf(
         y -= 10 * mm
         y = _ensure_page_space(c, y)
 
-    # 마지막 페이지 저장
+    # ─ 마지막 페이지 저장 ─
     c.save()
 
     run_dir_rel = os.path.relpath(out_dir, os.getcwd())
     file_rel = os.path.relpath(pdf_path, out_dir)  # "evidence_report.pdf"
 
-    # 추후 원하면 manifest 같은 것도 out_dir에 떨어뜨릴 수 있음
+    # 간단 메타 정보
     meta_path = os.path.join(out_dir, "meta.json")
     meta_data = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -266,4 +305,3 @@ def generate_evidence_pdf(
         "run_dir_rel": run_dir_rel,
         "file_rel": file_rel,
     }
-
