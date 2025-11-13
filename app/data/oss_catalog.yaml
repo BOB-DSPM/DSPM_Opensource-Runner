@@ -20,7 +20,7 @@ items:
     category: "cloud-compliance"
     tags: ["sql", "aws", "compliance", "report"]
     homepage: "https://steampipe.io"
-    desc: "클라우드 리소스를 SQL로 질의해 컴플라이언스 결과를 CSV/JSON/HTML 등으로 내보낼 수 있는 도구(모드/플러그인 사용)"
+    desc: "Powerpipe benchmark를 통해 Steampipe 모드(예: github.com/turbot/steampipe-mod-aws-compliance)를 실행하고, 컴플라이언스 결과를 JSON/CSV/HTML 리포트로 내보내는 도구"
     license: "AGPL-3.0"
 
   - code: scout
@@ -29,4 +29,4 @@ items:
     tags: ["aws", "azure", "gcp", "assessment", "report"]
     homepage: "https://github.com/nccgroup/ScoutSuite"
     desc: "멀티클라우드 구성 점검 후 인터랙티브 HTML 및 JSON 리포트를 생성하여 증적을 제공하는 평가 도구"
-    license: "GPL-2.0"
+    license: "GPL-3.0"
