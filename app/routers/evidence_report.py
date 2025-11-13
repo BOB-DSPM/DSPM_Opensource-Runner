@@ -10,6 +10,7 @@ from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import FileResponse
 
 from ..services import evidence_report_service as svc
+import os
 
 router = APIRouter(prefix="/api/evidence", tags=["evidence"])
 
