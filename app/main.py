@@ -3,7 +3,7 @@
 # =========================
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import health, oss
+from app.routers import health, oss, evidence_report
 
 app = FastAPI(title="SAGE OSS API", version="0.1.0")
 
@@ -26,3 +26,4 @@ app.add_middleware(
 
 app.include_router(health.router, prefix="/health", tags=["health"])
 app.include_router(oss.router, prefix="/oss", tags=["oss"])
+app.include_router(evidence_report.router, prefix="/oss", tags=["evidence"])
