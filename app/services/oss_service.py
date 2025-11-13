@@ -506,8 +506,7 @@ def _detail_template(
 
 
 # ──────────────────────────────────────────────────────────────
-# 각 OSS detail / args
-# (prowler, checkov, trivy, gitleaks, custodian, steampipe, scout)
+# Prowler
 # ──────────────────────────────────────────────────────────────
 def _prowler_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge(
@@ -686,6 +685,9 @@ def _build_prowler_args(payload: Dict[str, Any]) -> List[str]:
     return args
 
 
+# ──────────────────────────────────────────────────────────────
+# Checkov
+# ──────────────────────────────────────────────────────────────
 def _checkov_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge(
         {
@@ -783,6 +785,9 @@ def _build_checkov_args(payload: Dict[str, Any]) -> List[str]:
     return args
 
 
+# ──────────────────────────────────────────────────────────────
+# Trivy
+# ──────────────────────────────────────────────────────────────
 def _trivy_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge(
         {
@@ -862,6 +867,9 @@ def _build_trivy_args(payload: Dict[str, Any]) -> List[str]:
     return args
 
 
+# ──────────────────────────────────────────────────────────────
+# Gitleaks
+# ──────────────────────────────────────────────────────────────
 def _gitleaks_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge(
         {
@@ -926,6 +934,9 @@ def _build_gitleaks_args(payload: Dict[str, Any]) -> List[str]:
     return args
 
 
+# ──────────────────────────────────────────────────────────────
+# Cloud Custodian
+# ──────────────────────────────────────────────────────────────
 def _custodian_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge(
         {
@@ -1023,6 +1034,9 @@ def _ensure_inline_policy_to_outdir(
     return payload
 
 
+# ──────────────────────────────────────────────────────────────
+# Steampipe (Powerpipe 기반)
+# ──────────────────────────────────────────────────────────────
 def _steampipe_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge(
         {
@@ -1100,6 +1114,9 @@ def _build_steampipe_args(payload: Dict[str, Any]) -> List[str]:
     ]
 
 
+# ──────────────────────────────────────────────────────────────
+# Scout Suite
+# ──────────────────────────────────────────────────────────────
 def _scout_detail(base: Dict[str, Any]) -> Dict[str, Any]:
     defaults = merge(
         {
@@ -1108,7 +1125,7 @@ def _scout_detail(base: Dict[str, Any]) -> Dict[str, Any]:
             "category": "cloud-security",
             "tags": ["aws", "azure", "gcp", "assessment", "report"],
             "homepage": "https://github.com/nccgroup/ScoutSuite",
-            "desc": "멀티클라우드 구성 점검 후 HTML 리포트 생성",
+            "desc": "멀티클라우드 구성 점검 후 HTML/JSON 리포트 생성",
             "license": "GPL-2.0",
         },
         base or {},
@@ -1128,6 +1145,14 @@ def _scout_detail(base: Dict[str, Any]) -> Dict[str, Any]:
             "type": "string",
             "required": False,
             "placeholder": "default",
+            "visible_if": {"provider": "aws"},
+        },
+        {
+            "key": "region",
+            "label": "Region (aws only)",
+            "type": "string",
+            "required": False,
+            "placeholder": "ap-northeast-2",
             "visible_if": {"provider": "aws"},
         },
         {
@@ -1164,6 +1189,11 @@ def _build_scout_args(payload: Dict[str, Any]) -> List[str]:
     if provider not in {"aws", "azure", "gcp"}:
         raise ValueError("Unsupported provider")
     args = ["scout", provider]
+
+    # AWS 전용 region 옵션
+    if provider == "aws" and (region := payload.get("region")):
+        args += ["--regions", str(region)]
+
     if (out := payload.get("output")):
         args += ["--report-dir", str(out)]
     return args
@@ -1263,6 +1293,7 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "pip": None,
         "install_cmds": [],
     },
+    # ScoutSuite: pip 패키지 이름은 ScoutSuite, CLI는 scout
     "scout": {"bin": "scout", "pip": "ScoutSuite", "install_cmds": None},
 }
 
