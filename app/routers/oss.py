@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, List
-from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse, FileResponse
 import json
+import os
 from pathlib import Path
 from urllib.parse import quote
 from mimetypes import guess_type
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse, FileResponse
 
 from ..services.oss_service import (
     get_catalog as svc_get_catalog,
@@ -167,7 +169,7 @@ def get_catalog(q: Optional[str] = Query(None, description="검색어 (선택)")
 
 
 # -------------------------------------------------------------------
-# [정적 경로 우선 선언] 파일 다운로드 / 최근 실행 / 실행 API
+# [정적 경로 우선 선언] 파일 다운로드 / Scout Suite 정적 자산 / 최근 실행 / 실행 API
 #  - 동적 경로("/{code}")보다 위에 선언하여 경로 충돌 방지
 # -------------------------------------------------------------------
 @router.get("/files", name="download_file", summary="실행 산출물 다운로드")
@@ -219,6 +221,66 @@ def download_file(
     )
 
 
+# ──────────────────────────────────────────────────────────────
+# Scout Suite HTML이 참조하는 정적 리소스 서빙
+#  - /inc-bootstrap/... /inc-scoutsuite/... /inc-fontawesome/... 등
+#  - /scoutsuite-results/scoutsuite_results_*.js 등
+# 최신 Scout 실행의 output_dir 기준으로 파일을 찾아 반환
+# ──────────────────────────────────────────────────────────────
+@router.get("/inc-{family}/{path:path}", summary="Scout Suite 정적 리소스")
+def get_scout_inc_static(family: str, path: str):
+    """
+    Scout Suite HTML 리포트가 로딩하는 정적 자산(inc-bootstrap, inc-scoutsuite 등)을
+    '가장 최근 Scout 실행 결과'의 output_dir 기준으로 서빙한다.
+    예) /oss/api/oss/inc-bootstrap/css/bootstrap.min.css
+    """
+    meta = svc_find_latest_result_for_code("scout")
+    if not meta:
+        raise HTTPException(status_code=404, detail="No scout run found")
+
+    out_dir = meta.get("output_dir")
+    if not out_dir:
+        raise HTTPException(status_code=404, detail="No output_dir in metadata")
+
+    base = os.path.abspath(out_dir)
+    rel_path = os.path.join(f"inc-{family}", path)
+    abs_path = os.path.abspath(os.path.join(base, rel_path))
+
+    # 디렉터리 탈출 방지 & 존재 여부 확인
+    if not abs_path.startswith(base + os.sep) or not os.path.isfile(abs_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(abs_path)
+
+
+@router.get("/scoutsuite-results/{filename}", summary="Scout Suite 결과 JS")
+def get_scout_results_static(filename: str):
+    """
+    Scout Suite 결과 JS 파일(scoutsuite_results_*.js, scoutsuite_exceptions_*.js)을
+    최신 Scout 실행 결과의 output_dir 기준으로 서빙한다.
+    예) /oss/api/oss/scoutsuite-results/scoutsuite_results_aws-xxxx.js
+    """
+    meta = svc_find_latest_result_for_code("scout")
+    if not meta:
+        raise HTTPException(status_code=404, detail="No scout run found")
+
+    out_dir = meta.get("output_dir")
+    if not out_dir:
+        raise HTTPException(status_code=404, detail="No output_dir in metadata")
+
+    base = os.path.abspath(out_dir)
+    rel_path = os.path.join("scoutsuite-results", filename)
+    abs_path = os.path.abspath(os.path.join(base, rel_path))
+
+    if not abs_path.startswith(base + os.sep) or not os.path.isfile(abs_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    return FileResponse(abs_path)
+
+
+# -------------------------------------------------------------------
+# 최근 실행 / 실행 API
+# -------------------------------------------------------------------
 @router.get("/{code}/runs/latest", summary="가장 최근 실행 결과(단건)를 반환")
 def get_latest_run(code: str, request: Request) -> Dict[str, Any]:
     """
@@ -231,7 +293,11 @@ def get_latest_run(code: str, request: Request) -> Dict[str, Any]:
     latest = svc_find_latest_result_for_code(code)
     if latest:
         # 실행했던 내용(로그/정책 등) 수집
-        executed = svc_collect_executed_contents(latest.get("run_dir"), latest.get("output_dir"), latest.get("code"))
+        executed = svc_collect_executed_contents(
+            latest.get("run_dir"),
+            latest.get("output_dir"),
+            latest.get("code"),
+        )
         latest["executed"] = executed or {}
         return _augment_with_download_urls(latest, request)
 
@@ -242,7 +308,11 @@ def get_latest_run(code: str, request: Request) -> Dict[str, Any]:
     for run_dir in run_dirs:
         summary = _build_summary_from_fs(run_dir, code_hint=None)
         if summary.get("code") == code:
-            executed = svc_collect_executed_contents(summary.get("run_dir"), summary.get("output_dir"), summary.get("code"))
+            executed = svc_collect_executed_contents(
+                summary.get("run_dir"),
+                summary.get("output_dir"),
+                summary.get("code"),
+            )
             summary["executed"] = executed or {}
             return _augment_with_download_urls(summary, request)
 
