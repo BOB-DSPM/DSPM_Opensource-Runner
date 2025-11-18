@@ -1,6 +1,6 @@
 # ============================================
 # file: app/services/evidence_report_service.py
-# (KISA 스타일 섹션 + 스크린샷 증적 포함, 폰트 크게 보기 좋게)
+# (SAGE 보고서 전용 새 구조 버전)
 # ============================================
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.utils import ImageReader  # 스크린샷 증적 삽입용
 
 from .oss_service import find_latest_result_for_code
 from ..utils.loader import get_item_by_code
@@ -25,12 +24,11 @@ from ..utils.loader import get_item_by_code
 # 설정
 # ──────────────────────────────────────────────
 EVIDENCE_ROOT = "./runs/evidence_pdf"
+DEFAULT_TOOL_CODES = ["prowler", "custodian", "steampipe", "scout"]
 
 # 폰트 경로 (app/services 기준 ../fonts/GowunDodum-Regular.ttf)
 BASE_DIR = Path(__file__).resolve().parent
 FONT_PATH = BASE_DIR.parent / "fonts" / "GowunDodum-Regular.ttf"
-
-# 한글 폰트 등록
 KOREAN_FONT_NAME = "GowunDodum"
 
 try:
@@ -38,6 +36,15 @@ try:
 except Exception as e:
     # 실패해도 기본 폰트로라도 생성되도록만 함
     print(f"[WARN] Failed to register Korean font '{KOREAN_FONT_NAME}': {e}")
+
+# 레이아웃 상수 (줄 간격 넉넉하게)
+TOP_MARGIN_MM = 30
+BOTTOM_MARGIN_MM = 25
+TITLE_FONT = 22
+SECTION_TITLE_FONT = 16
+SUBTITLE_FONT = 13
+BODY_FONT = 11
+SMALL_FONT = 9
 
 
 # ──────────────────────────────────────────────
@@ -57,8 +64,8 @@ def _wrap_text(text: str, max_chars: int) -> List[str]:
     - ReportLab에서 긴 문자열을 섹션별로 줄바꿈하기 위함.
     """
     lines: List[str] = []
-    for raw_line in text.split("\n"):
-        line = raw_line.strip()
+    for raw_line in (text or "").split("\n"):
+        line = raw_line.rstrip()
         if not line:
             lines.append("")
             continue
@@ -76,112 +83,279 @@ def _wrap_text(text: str, max_chars: int) -> List[str]:
     return lines
 
 
-def _draw_section_title(c: canvas.Canvas, text: str, x: float, y: float):
+def _new_page_y() -> float:
+    return A4[1] - TOP_MARGIN_MM * mm
+
+
+def _ensure_page_space(
+    c: canvas.Canvas,
+    y: float,
+    lines: int,
+    font_size: int = BODY_FONT,
+) -> float:
     """
-    섹션 제목: 크게(16pt) + 본문 기본 폰트 12pt로 세팅.
+    필요한 줄 수 기준으로 여백이 부족하면 새 페이지로 넘김.
     """
-    c.setFont(KOREAN_FONT_NAME, 16)
-    c.drawString(x, y, text)
-    c.setFont(KOREAN_FONT_NAME, 12)
-
-
-def _draw_kv(c: canvas.Canvas, x: float, y: float, key: str, value: str) -> float:
-    """
-    key: value 형태 한 줄 출력. 여러 줄로 감싸질 수 있음.
-    - 폰트: 12pt
-    - 줄 간격: 16pt 수준으로 좀 넉넉하게
-    반환값: 다음 줄 y 좌표.
-    """
-    max_chars = 70  # 폰트 키웠으니 줄당 글자 수를 조금 줄임
-    lines = _wrap_text(str(value or ""), max_chars)
-
-    # key
-    c.setFont(KOREAN_FONT_NAME, 12)
-    c.drawString(x, y, f"{key}:")
-    # value
-    offset_x = x + 50  # value 들여쓰기 조금 더
-    c.setFont(KOREAN_FONT_NAME, 12)
-
-    first = True
-    line_gap = 16  # 줄 간격
-
-    for line in lines:
-        if first:
-            c.drawString(offset_x, y, line)
-            first = False
-        else:
-            y -= line_gap
-            c.drawString(offset_x, y, line)
-    # 다음 항목 간 간격
-    return y - (line_gap // 2)
-
-
-def _ensure_page_space(c: canvas.Canvas, y: float, min_y: float = 40 * mm) -> float:
-    """y가 너무 아래로 내려갔으면 새 페이지 시작."""
-    if y < min_y:
+    bottom = BOTTOM_MARGIN_MM * mm
+    leading = font_size + 6  # 줄 간격 넉넉하게
+    if y - lines * leading < bottom:
         c.showPage()
-        return A4[1] - 30 * mm
+        return _new_page_y()
     return y
 
 
-def _summarize_files(files: List[Dict[str, Any]], max_files: int = 8) -> List[Dict[str, Any]]:
+def _draw_paragraph(
+    c: canvas.Canvas,
+    text: str,
+    x: float,
+    y: float,
+    max_chars: int = 80,
+    font_size: int = BODY_FONT,
+) -> float:
     """
-    파일이 너무 많기 때문에 상위 N개만 요약에 넣음.
-    (mtime desc 기준)
+    여러 줄 문단 출력.
+    반환값: 마지막 줄 다음 y 좌표
+    """
+    lines = _wrap_text(text, max_chars)
+    if not lines:
+        return y
+
+    y = _ensure_page_space(c, y, len(lines), font_size=font_size)
+    c.setFont(KOREAN_FONT_NAME, font_size)
+    leading = font_size + 6
+
+    for line in lines:
+        c.drawString(x, y, line)
+        y -= leading
+    return y
+
+
+def _draw_heading(
+    c: canvas.Canvas,
+    text: str,
+    x: float,
+    y: float,
+    level: int = 1,
+) -> float:
+    """
+    level 1: 큰 섹션 제목
+    level 2: subsecion 제목
+    """
+    if level == 1:
+        font_size = SECTION_TITLE_FONT
+    else:
+        font_size = SUBTITLE_FONT
+
+    y = _ensure_page_space(c, y, 2, font_size=font_size)
+    c.setFont(KOREAN_FONT_NAME, font_size)
+    c.drawString(x, y, text)
+    y -= font_size + 8
+    return y
+
+
+def _extract_common_context(tool_meta: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    각 도구의 result.json payload를 참고해 공통 컨텍스트(AWS Profile, Region 등)를 유추.
+    """
+    profiles = set()
+    regions = set()
+    for meta in tool_meta.values():
+        payload = meta.get("payload") or {}
+        profile = payload.get("profile")
+        region = payload.get("region")
+        if profile:
+            profiles.add(str(profile))
+        if region:
+            regions.add(str(region))
+
+    profile_str = ", ".join(sorted(profiles)) if profiles else "default (추정, 명시 옵션 없음)"
+    region_str = ", ".join(sorted(regions)) if regions else "(실행 옵션에 region 미지정)"
+
+    return {"profile": profile_str, "region": region_str}
+
+
+def _detect_frameworks_from_files(files: List[Dict[str, Any]]) -> List[str]:
+    """
+    파일 경로/이름을 보고 어떤 컴플라이언스 프레임워크 산출물이 있는지 간단 탐지.
+    (Prowler CSV 파일 네이밍 활용)
     """
     if not files:
         return []
-    sorted_files = sorted(files, key=lambda f: f.get("mtime", 0), reverse=True)
-    return sorted_files[:max_files]
+
+    mapping = [
+        ("isms_p", "ISMS-P"),
+        ("kisa_isms_p", "ISMS-P"),
+        ("iso27001", "ISO/IEC 27001"),
+        ("gdpr", "GDPR"),
+        ("hipaa", "HIPAA"),
+        ("cis_", "CIS Benchmark"),
+        ("fedramp", "FedRAMP"),
+        ("soc2", "SOC 2"),
+        ("gxp", "GxP / Annex 11"),
+    ]
+
+    found = set()
+    for f in files:
+        path = str(f.get("path", "")).lower()
+        for key, label in mapping:
+            if key in path:
+                found.add(label)
+    return sorted(found)
 
 
-def _load_metas_for_codes(codes: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
-    metas: Dict[str, Optional[Dict[str, Any]]] = {}
+# ──────────────────────────────────────────────
+# 세부 취약점 항목 설명 템플릿
+# ──────────────────────────────────────────────
+DETAILED_ITEMS: List[Dict[str, Any]] = [
+    {
+        "code": "CA-03",
+        "title": "클라우드 계정 루트·관리자 권한 관리",
+        "area": "계정보안",
+        "overview": (
+            "클라우드 계정의 루트 또는 관리자 권한이 최소 권한 원칙에 맞게 관리되지 않거나, "
+            "불필요하게 활성화되어 있는 경우를 점검한다."
+        ),
+        "check": (
+            "Prowler, Scout Suite 등의 도구를 활용해 루트 계정 사용 여부, MFA 적용 여부, "
+            "관리자 권한을 가진 IAM 사용자/역할의 현황을 점검하였다."
+        ),
+        "purpose": (
+            "과도한 권한을 가진 계정을 식별하고, 권한 축소·MFA 적용·비사용 계정 비활성화 등을 통해 "
+            "계정 탈취 시 피해를 최소화하기 위함이다."
+        ),
+        "risk": (
+            "루트/관리자 계정이 탈취되면 전체 클라우드 리소스에 대한 제어권이 공격자에게 넘어가 "
+            "대규모 정보 유출 및 서비스 중단으로 이어질 수 있다."
+        ),
+        "tools": "Prowler, Cloud Custodian, Steampipe (mods), Scout Suite",
+        "good": (
+            "루트 계정은 비상용으로만 사용되고, 일상적 운영에는 별도 최소 권한 계정이 사용된다. "
+            "루트 및 관리자 계정에는 MFA가 적용되어 있으며, 비사용 계정은 주기적으로 점검·비활성화된다."
+        ),
+        "bad": (
+            "루트 계정이 일상적인 운영에 사용되거나, 관리자 권한 계정에 MFA가 미적용되어 있고, "
+            "비사용 계정이 장기간 방치되어 있는 경우."
+        ),
+        "steps": [
+            "Prowler로 AWS 계정 전반에 대한 계정·IAM 관련 체크를 수행하고 High/Medium 이상 결과를 추출한다.",
+            "Scout Suite HTML 리포트에서 계정 보안(Identity & Access Management) 관련 대시보드를 확인하여 위험 계정을 목록화한다.",
+            "Cloud Custodian 정책으로 비사용·과도 권한 계정에 대한 자동 알림 또는 차단 정책을 적용한다.",
+        ],
+    },
+    {
+        "code": "LG-01",
+        "title": "클라우드 감사 로그(CloudTrail 등) 설정 미흡",
+        "area": "로그·감사",
+        "overview": (
+            "클라우드 환경에서 API 호출 이력, 콘솔 로그인 이력 등 감사 로그가 적절히 수집·보존되지 않는 경우를 점검한다."
+        ),
+        "check": (
+            "Prowler, Steampipe 모드(aws_compliance.benchmark.cis_v300 등)를 이용해 CloudTrail, Config, "
+            "S3 서버 액세스 로그 등의 활성화 여부 및 보호 설정을 점검하였다."
+        ),
+        "purpose": (
+            "보안 사고 발생 시 행위 추적 및 원인 분석이 가능하도록 감사 로그를 충분히 수집·보존하고, "
+            "위·변조 방지 설정을 통해 로그 신뢰성을 확보하기 위함이다."
+        ),
+        "risk": (
+            "감사 로그가 없거나 불충분하면 침해 사고 발생 시 공격 경로와 영향 범위를 파악하기 어렵고, "
+            "법적·규제 준수 측면에서도 증적 부족으로 이어질 수 있다."
+        ),
+        "tools": "Prowler, Cloud Custodian, Steampipe (mods), Scout Suite",
+        "good": (
+            "CloudTrail, Config 등 핵심 감사 로그가 모든 리전에 대해 활성화되어 있고, "
+            "로그는 별도의 보안 계정/S3 버킷 등에 장기 보존되며, 버전 관리·불변 스토리지 설정이 적용되어 있다."
+        ),
+        "bad": (
+            "일부 리전/서비스에 대해서만 로그가 활성화되어 있거나, 로그 보존 기간이 짧고, "
+            "버전 관리/불변 스토리지 등의 보호 설정이 되어 있지 않은 경우."
+        ),
+        "steps": [
+            "Steampipe의 AWS Compliance 모드를 실행해 로그·감사 관련 규칙 결과를 CSV/JSON으로 수집한다.",
+            "Prowler의 로그/모니터링 관련 체크 결과 중 실패한 항목을 정리해 우선순위에 따라 개선 계획을 수립한다.",
+            "Cloud Custodian 또는 Terraform 등을 활용해 로그 활성화 및 보존 정책을 코드화한다.",
+        ],
+    },
+]
+
+
+# ──────────────────────────────────────────────
+# 메인 함수
+# ──────────────────────────────────────────────
+def generate_evidence_pdf(
+    codes: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    SAGE 보고서 구조에 맞춰 PDF 증적 보고서를 생성한다.
+
+    반환:
+    {
+      "pdf_path": 절대경로,
+      "run_dir_rel": "runs/evidence_pdf/20251113_153012",
+      "file_rel": "SAGE_report.pdf"
+    }
+    """
+    if not codes:
+        codes = list(DEFAULT_TOOL_CODES)
+
+    # 1) 각 도구별 latest result 메타 로딩
+    tool_meta: Dict[str, Dict[str, Any]] = {}
     for code in codes:
-        try:
-            meta = find_latest_result_for_code(code)
-        except Exception:
-            meta = None
-        metas[code] = meta
-    return metas
+        meta = find_latest_result_for_code(code) or {}
+        tool_meta[code] = meta
 
+    # 산출물 카운트 및 프레임워크 감지
+    artifact_counts: Dict[str, int] = {}
+    frameworks_all = set()
+    for code, meta in tool_meta.items():
+        files = meta.get("files") or []
+        artifact_counts[code] = len(files)
+        for fw in _detect_frameworks_from_files(files):
+            frameworks_all.add(fw)
 
-# ──────────────────────────────────────────────
-# 1장. 표지
-# ──────────────────────────────────────────────
-def _draw_cover_page(
-    c: canvas.Canvas,
-    codes: List[str],
-    metas: Dict[str, Optional[Dict[str, Any]]],
-):
+    context = _extract_common_context(tool_meta)
+    aws_profile = context["profile"]
+    aws_region = context["region"]
+    frameworks_str = ", ".join(sorted(frameworks_all)) if frameworks_all else "-"
+
+    # 2) PDF 준비
+    out_dir = _safe_evidence_dir(EVIDENCE_ROOT)
+    pdf_filename = "evidence_report.pdf"
+    pdf_path = os.path.join(out_dir, pdf_filename)
+
+    c = canvas.Canvas(pdf_path, pagesize=A4)
     width, height = A4
     margin_x = 25 * mm
-    y = height - 60 * mm
+    y = _new_page_y()
 
-    # 제목 크게
-    c.setFont(KOREAN_FONT_NAME, 26)
-    c.drawString(margin_x, y, "SAGE 클라우드 보안 / 컴플라이언스")
-    y -= 18 * mm
+    # ─────────────────────────────────────
+    # 0. 표지
+    # ─────────────────────────────────────
+    c.setFont(KOREAN_FONT_NAME, TITLE_FONT)
+    c.drawString(margin_x, y, "SAGE 클라우드 보안·컴플라이언스")
+    y -= TITLE_FONT + 10
     c.drawString(margin_x, y, "취약점 분석·평가 증적 보고서")
-    y -= 30 * mm
+    y -= TITLE_FONT + 20
 
-    c.setFont(KOREAN_FONT_NAME, 14)
+    c.setFont(KOREAN_FONT_NAME, SUBTITLE_FONT)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.drawString(margin_x, y, f"작성일시: {now_str}")
-    y -= 10 * mm
-
-    aws_profile = os.environ.get("AWS_PROFILE", "default")
+    y -= SUBTITLE_FONT + 8
     c.drawString(margin_x, y, f"AWS Profile: {aws_profile}")
-    y -= 10 * mm
+    y -= SUBTITLE_FONT + 8
+    c.drawString(margin_x, y, f"대상 리전: {aws_region}")
+    y -= SUBTITLE_FONT + 8
 
-    tool_names: List[str] = []
-    for code in codes:
-        item = get_item_by_code(code) or {}
-        tool_names.append(item.get("name", code))
-    c.drawString(margin_x, y, "사용 도구: " + ", ".join(tool_names))
-    y -= 14 * mm
+    tools_label = ", ".join(
+        get_item_by_code(code).get("name", code)
+        if get_item_by_code(code)
+        else code
+        for code in codes
+    )
+    c.drawString(margin_x, y, f"사용 도구: {tools_label}")
+    y -= SUBTITLE_FONT + 14
 
-    c.setFont(KOREAN_FONT_NAME, 12)
+    c.setFont(KOREAN_FONT_NAME, SMALL_FONT)
     c.drawString(
         margin_x,
         y,
@@ -189,357 +363,121 @@ def _draw_cover_page(
     )
 
     c.showPage()
+    y = _new_page_y()
 
+    # ─────────────────────────────────────
+    # 1. 종합 요약 (Executive Summary)
+    # ─────────────────────────────────────
+    y = _draw_heading(c, "1. 종합 요약 (Executive Summary)", margin_x, y, level=1)
 
-# ──────────────────────────────────────────────
-# 2장. 개요
-# ──────────────────────────────────────────────
-def _draw_overview_page(
-    c: canvas.Canvas,
-    codes: List[str],
-    metas: Dict[str, Optional[Dict[str, Any]]],
-):
-    width, height = A4
-    margin_x = 20 * mm
-    y = height - 30 * mm
-
-    _draw_section_title(c, "1. 개요", margin_x, y)
-    y -= 14 * mm
-
-    aws_profile = os.environ.get("AWS_PROFILE", "default")
-    regions: List[str] = []
-    for meta in metas.values():
-        if not meta:
-            continue
-        payload = meta.get("payload") or {}
-        region = payload.get("region")
-        if region and region not in regions:
-            regions.append(region)
-
-    region_str = ", ".join(regions) if regions else "(실행 옵션에 region 미지정)"
-
-    y = _draw_kv(c, margin_x, y, "대상 계정(AWS Profile)", aws_profile)
-    y = _draw_kv(c, margin_x, y, "대상 리전", region_str)
-    y = _draw_kv(
-        c,
-        margin_x,
-        y,
-        "사용 도구",
-        ", ".join([get_item_by_code(code).get("name", code) if get_item_by_code(code) else code for code in codes]),
+    # 1-1 전체 점검 개요
+    y = _draw_heading(c, "1-1. 전체 점검 개요", margin_x, y, level=2)
+    total_artifacts = sum(artifact_counts.values())
+    text = (
+        f"이번 점검은 AWS Profile '{aws_profile}' 환경을 대상으로, "
+        f"{tools_label} 4종 도구를 활용하여 클라우드 보안·컴플라이언스 구성을 분석·평가하였다. "
+        f"각 도구의 최신 실행 결과 기준으로 총 {total_artifacts}개 이상의 산출물(리포트/로그/JSON 등)이 생성되었다."
     )
+    y = _draw_paragraph(c, text, margin_x, y, max_chars=80, font_size=BODY_FONT)
+    y -= 6
 
-    # 각 도구별 최신 실행 시간/상태 요약
-    for code in codes:
-        meta = metas.get(code)
-        item = get_item_by_code(code) or {}
-        tool_name = item.get("name", code)
-
-        y -= 8 * mm
-        y = _ensure_page_space(c, y)
-        _draw_section_title(c, f"- {tool_name} 최신 실행 요약", margin_x, y)
-        y -= 10 * mm
-
-        if not meta:
-            y = _draw_kv(c, margin_x, y, "상태", "최근 실행 결과가 존재하지 않습니다.")
-            y -= 6 * mm
-            continue
-
-        rc = meta.get("rc")
-        rc_str = "-" if rc is None else str(rc)
-        out_dir = meta.get("output_dir", "-")
-        run_dir = meta.get("run_dir", "-")
-        stdout = (meta.get("stdout") or "")[:200]
-        duration_ms = meta.get("duration_ms")
-        dur_str = "-" if duration_ms is None else f"{duration_ms} ms"
-
-        y = _draw_kv(c, margin_x, y, "Run dir", str(run_dir))
-        y = _draw_kv(c, margin_x, y, "Output dir", str(out_dir))
-        y = _draw_kv(c, margin_x, y, "Exit code", rc_str)
-        y = _draw_kv(c, margin_x, y, "Duration", dur_str)
-        if stdout:
-            y = _draw_kv(c, margin_x, y, "Console excerpt", stdout.replace("\n", " "))
-
-        y -= 6 * mm
-
-    c.showPage()
-
-
-# ──────────────────────────────────────────────
-# 3장. 클라우드 취약점 분석·평가 요약 (표 형식)
-# ──────────────────────────────────────────────
-def _build_cloud_summary_rows(
-    codes: List[str],
-    metas: Dict[str, Optional[Dict[str, Any]]],
-) -> List[Dict[str, Any]]:
-    """
-    KISA 스타일 '분류/코드/점검 항목/도구/결과 요약' 표용 Row 생성.
-    - 여기서는 도구 단위로 간단 요약 (추후 KISA 코드 매핑을 추가해도 됨)
-    """
-    rows: List[Dict[str, Any]] = []
-    for idx, code in enumerate(codes, start=1):
-        meta = metas.get(code)
-        item = get_item_by_code(code) or {}
-        tool_name = item.get("name", code)
-        category = item.get("category", "cloud-security")
-
-        if not meta:
-            result = "최근 실행 결과 없음"
-            artifact_cnt = 0
-        else:
-            files = meta.get("files") or []
-            artifact_cnt = len(files)
-            rc = meta.get("rc")
-            if rc is None or rc == 0:
-                result = f"성공 (rc={rc}), 산출물 {artifact_cnt}개"
-            else:
-                result = f"오류 (rc={rc}), 산출물 {artifact_cnt}개"
-
-        rows.append(
-            {
-                "category": category,
-                "code": f"OSS-{idx:02d}",
-                "title": f"{tool_name} 기반 클라우드 구성/컴플라이언스 점검",
-                "tools": tool_name,
-                "result": result,
-            }
+    # 1-2 규제·컴플라이언스 프레임워크 관점 요약
+    y = _draw_heading(c, "1-2. 규제·컴플라이언스 관점 요약", margin_x, y, level=2)
+    if frameworks_str != "-":
+        text = (
+            "도구 산출물 분석 결과, 다음 컴플라이언스 프레임워크 관점의 점검 결과가 생성되었다: "
+            f"{frameworks_str}. "
+            "각 프레임워크별 상세 위반 여부·항목은 개별 CSV/JSON 리포트에서 확인할 수 있다."
         )
-    return rows
+    else:
+        text = (
+            "현재 수집된 산출물에서는 특정 규제·컴플라이언스 프레임워크명을 식별하지 못하였다. "
+            "Prowler/Steampipe 등의 출력 포맷 및 파일명을 기반으로 후속 분석이 가능하다."
+        )
+    y = _draw_paragraph(c, text, margin_x, y, max_chars=80, font_size=BODY_FONT)
+    y -= 6
 
-
-def _draw_cloud_summary_table(
-    c: canvas.Canvas,
-    summary_rows: List[Dict[str, Any]],
-):
-    width, height = A4
-    margin_x = 20 * mm
-    y = height - 30 * mm
-
-    _draw_section_title(c, "2. 클라우드 취약점 분석·평가 요약", margin_x, y)
-    y -= 12 * mm
-
-    c.setFont(KOREAN_FONT_NAME, 12)
-    headers = ["분류", "코드", "점검 항목", "도구", "결과 요약"]
-    col_x = [
-        margin_x,
-        margin_x + 25 * mm,
-        margin_x + 50 * mm,
-        margin_x + 120 * mm,
-        margin_x + 145 * mm,
+    # 1-3 개선 우선순위 (템플릿)
+    y = _draw_heading(c, "1-3. 개선 우선순위(템플릿)", margin_x, y, level=2)
+    priority_lines = [
+        "① CA-03 클라우드 계정 루트·관리자 권한 관리",
+        "② LG-01 클라우드 감사 로그(CloudTrail 등) 설정 보강",
+        "③ (선택) 스토리지·네트워크·암호화 등 추가 통제 항목",
     ]
-
-    # 헤더
-    for i, h in enumerate(headers):
-        c.drawString(col_x[i], y, h)
-    y -= 6 * mm
-    c.line(margin_x, y, width - margin_x, y)
-    y -= 6 * mm
-
-    c.setFont(KOREAN_FONT_NAME, 11)
-
-    for row in summary_rows:
-        y = _ensure_page_space(c, y)
-        line_gap = 14
-
-        c.drawString(col_x[0], y, str(row.get("category", ""))[:16])
-        c.drawString(col_x[1], y, row.get("code", ""))
-
-        title_lines = _wrap_text(row.get("title", ""), 40)
-        tool_lines = _wrap_text(row.get("tools", ""), 18)
-        result_lines = _wrap_text(row.get("result", ""), 45)
-        max_lines = max(len(title_lines), len(tool_lines), len(result_lines))
-
-        for i in range(max_lines):
-            if i > 0:
-                y -= line_gap
-                y = _ensure_page_space(c, y)
-            if i < len(title_lines):
-                c.drawString(col_x[2], y, title_lines[i])
-            if i < len(tool_lines):
-                c.drawString(col_x[3], y, tool_lines[i])
-            if i < len(result_lines):
-                c.drawString(col_x[4], y, result_lines[i])
-
-        y -= line_gap
+    for line in priority_lines:
+        y = _draw_paragraph(c, f"- {line}", margin_x, y, max_chars=80, font_size=BODY_FONT)
+    y -= 4
 
     c.showPage()
+    y = _new_page_y()
 
+    # ─────────────────────────────────────
+    # 2. 컴플라이언스 관점 요약
+    # ─────────────────────────────────────
+    y = _draw_heading(c, "2. 컴플라이언스 관점 요약", margin_x, y, level=1)
 
-# ──────────────────────────────────────────────
-# 4장. 세부 취약점 항목 (KISA 스타일 템플릿)
-# ──────────────────────────────────────────────
-def _draw_vuln_detail_section(
-    c: canvas.Canvas,
-    ca_code: str,
-    title: str,
-    overview: str,
-    check_content: str,
-    purpose: str,
-    threat: str,
-    criteria_good: str,
-    criteria_bad: str,
-    tools: str,
-    steps: List[str],
-):
-    width, height = A4
-    margin_x = 20 * mm
-    y = height - 30 * mm
-
-    _draw_section_title(c, f"3. 세부 취약점 항목 - {ca_code} {title}", margin_x, y)
-    y -= 14 * mm
-
-    y = _draw_kv(c, margin_x, y, "취약점 개요", overview)
-    y = _draw_kv(c, margin_x, y, "점검내용", check_content)
-    y = _draw_kv(c, margin_x, y, "점검목적", purpose)
-    y = _draw_kv(c, margin_x, y, "보안위협", threat)
-    y = _draw_kv(c, margin_x, y, "점검대상 도구", tools)
-    y = _draw_kv(c, margin_x, y, "판단기준(양호)", criteria_good)
-    y = _draw_kv(c, margin_x, y, "판단기준(취약)", criteria_bad)
-
-    c.setFont(KOREAN_FONT_NAME, 13)
-    c.drawString(margin_x, y, "점검 및 조치 사례")
-    y -= 10 * mm
-    c.setFont(KOREAN_FONT_NAME, 12)
-
-    for idx, step in enumerate(steps, start=1):
-        y = _ensure_page_space(c, y)
-        y = _draw_kv(c, margin_x, y, f"Step {idx}", step)
+    for item in DETAILED_ITEMS:
+        summary = (
+            f"[{item['code']}] {item['area']} – {item['title']}\n"
+            f"· 관련 규제: ISMS-P / ISO27001 / (환경에 따라 추가 매핑)\n"
+            f"· 영향도: High (템플릿 기준)\n"
+            f"· 근거 도구: {item['tools']}"
+        )
+        y = _draw_paragraph(c, summary, margin_x, y, max_chars=90, font_size=BODY_FONT)
+        y -= 4
 
     c.showPage()
+    y = _new_page_y()
 
+    # ─────────────────────────────────────
+    # 3. 세부 취약점 항목
+    # ─────────────────────────────────────
+    y = _draw_heading(c, "3. 세부 취약점 항목", margin_x, y, level=1)
 
-def _draw_vuln_detail_pages(
-    c: canvas.Canvas,
-    codes: List[str],
-):
-    """
-    완전 자동 데이터 연동은 아니고,
-    KISA 기술적 취약점 상세 가이드 스타일의 정적 템플릿을 2~3개 넣어줌.
-    (실제 결과는 OSS 산출물과 연동되어 별도 검토 가능)
-    """
-    tool_names = ", ".join(
-        [get_item_by_code(code).get("name", code) if get_item_by_code(code) else code for code in codes]
-    )
+    for item in DETAILED_ITEMS:
+        title = f"3. 세부 취약점 항목 - {item['code']} {item['title']}"
+        y = _draw_heading(c, title, margin_x, y, level=2)
 
-    # 1) 루트/관리자 계정 관리 취약점 예시
-    _draw_vuln_detail_section(
-        c,
-        ca_code="CA-03",
-        title="클라우드 계정 루트·관리자 권한 관리",
-        overview=(
-            "클라우드 계정의 루트 또는 관리자 권한이 최소 권한 원칙에 맞게 관리되지 않거나, "
-            "불필요하게 활성화되어 있는 경우를 점검한다."
-        ),
-        check_content=(
-            "Prowler, Scout Suite 등의 도구를 활용해 루트 계정 사용 여부, MFA 적용 여부, "
-            "관리자 권한을 가진 IAM 사용자/역할의 현황을 점검한다."
-        ),
-        purpose=(
-            "과도한 권한을 가진 계정을 식별하고, 권한 축소·MFA 적용·비사용 계정 비활성화 등을 통해 "
-            "계정 탈취 시 피해를 최소화한다."
-        ),
-        threat=(
-            "루트/관리자 계정이 탈취되면 전체 클라우드 리소스에 대한 제어권이 공격자에게 넘어가 "
-            "대규모 정보 유출 및 서비스 중단으로 이어질 수 있다."
-        ),
-        criteria_good=(
-            "루트 계정은 비상용으로만 사용되고, 일상적 운영에는 별도 최소 권한 계정이 사용된다. "
-            "루트 및 관리자 계정에는 MFA가 적용되어 있으며, 사용 이력도 주기적으로 점검한다."
-        ),
-        criteria_bad=(
-            "루트 계정이 일상적인 운영에 사용되거나, 관리자 권한 계정에 MFA가 미적용되어 있고, "
-            "비사용 계정이 장기간 방치되어 있는 경우."
-        ),
-        tools=tool_names,
-        steps=[
-            "Prowler로 AWS 계정 전반에 대한 계정·IAM 관련 체크를 수행하고 High/Medium 이상 "
-            "결과를 추출한다.",
-            "Scout Suite HTML 리포트에서 계정 보안(Identity & Access Management) 관련 대시보드를 "
-            "확인하여 위험 계정을 목록화한다.",
-            "Cloud Custodian 정책으로 비사용·과도 권한 계정에 대한 자동 알림 또는 차단 정책을 적용한다.",
-        ],
-    )
+        y = _draw_paragraph(c, f"취약점 개요: {item['overview']}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"점검 내용: {item['check']}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"점검 목적: {item['purpose']}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"보안 위협: {item['risk']}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"점검 대상 도구: {item['tools']}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"판단 기준(양호): {item['good']}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"판단 기준(취약): {item['bad']}", margin_x, y, 90, BODY_FONT)
 
-    # 2) 로깅·모니터링 미흡 취약점 예시
-    _draw_vuln_detail_section(
-        c,
-        ca_code="LG-01",
-        title="클라우드 감사 로그(CloudTrail 등) 설정 미흡",
-        overview=(
-            "클라우드 환경에서 API 호출 이력, 콘솔 로그인 이력 등 감사 로그가 적절히 수집·보존되지 "
-            "않는 경우를 점검한다."
-        ),
-        check_content=(
-            "Prowler, Steampipe 모드(aws_compliance.benchmark.cis_v300 등)를 이용해 CloudTrail, "
-            "Config, S3 서버 액세스 로그 등의 활성화 여부 및 보호 설정을 점검한다."
-        ),
-        purpose=(
-            "보안 사고 발생 시 행위 추적 및 원인 분석이 가능하도록 감사 로그를 충분히 수집·보존하고, "
-            "위·변조 방지 설정을 통해 로그 신뢰성을 확보하기 위함이다."
-        ),
-        threat=(
-            "감사 로그가 없거나 불충분하면 침해 사고 발생 시 공격 경로와 영향 범위를 파악하기 어렵고, "
-            "법적·규제 준수 측면에서도 증적 부족으로 제재를 받을 수 있다."
-        ),
-        criteria_good=(
-            "CloudTrail, Config 등 핵심 감사 로그가 모든 리전에 대해 활성화되어 있고, "
-            "로그는 별도의 보안 계정/S3 버킷 등에 장기 보존된다."
-        ),
-        criteria_bad=(
-            "일부 리전/서비스에 대해서만 로그가 활성화되어 있거나, 로그 보존 기간이 짧고, "
-            "버전 관리/불변 스토리지 등의 보호 설정이 되어 있지 않은 경우."
-        ),
-        tools=tool_names,
-        steps=[
-            "Steampipe의 AWS Compliance 모드를 실행해 로그·감사 관련 규칙(CloudTrail, Config, "
-            "S3 log 등) 결과를 CSV/JSON으로 수집한다.",
-            "Prowler의 로그/모니터링 관련 체크 결과 중 실패한 항목을 정리해 우선순위에 따라 개선 계획을 수립한다.",
-            "Cloud Custodian 또는 Terraform 등을 활용해 로그 활성화 및 보존 정책을 코드화한다.",
-        ],
-    )
+        y = _draw_paragraph(c, "점검 및 조치 사례:", margin_x, y, 90, BODY_FONT)
+        for idx, step in enumerate(item["steps"], start=1):
+            y = _draw_paragraph(c, f"Step {idx}: {step}", margin_x + 6 * mm, y, 88, BODY_FONT)
 
+        y -= 8
+        y = _ensure_page_space(c, y, 3, font_size=BODY_FONT)
 
-# ──────────────────────────────────────────────
-# 5장. 도구별 실행 상세
-# ──────────────────────────────────────────────
-def _draw_tool_sections(
-    c: canvas.Canvas,
-    codes: List[str],
-    metas: Dict[str, Optional[Dict[str, Any]]],
-):
-    width, height = A4
-    margin_x = 20 * mm
-    y = height - 30 * mm
+    c.showPage()
+    y = _new_page_y()
 
-    _draw_section_title(c, "4. 도구별 실행 상세", margin_x, y)
-    y -= 14 * mm
+    # ─────────────────────────────────────
+    # 4. 도구별 실행 상세
+    # ─────────────────────────────────────
+    y = _draw_heading(c, "4. 도구별 실행 상세", margin_x, y, level=1)
 
     for code in codes:
-        meta = metas.get(code)
+        meta = tool_meta.get(code) or {}
         item = get_item_by_code(code) or {}
-
         tool_name = item.get("name", code)
-        tool_desc = item.get("desc", "")
-        tool_category = item.get("category", "")
-        tool_homepage = item.get("homepage", "")
+        category = item.get("category", "-")
+        homepage = item.get("homepage", "-")
+        desc = item.get("desc", "")
 
-        y = _ensure_page_space(c, y)
-        _draw_section_title(c, f"[{tool_name}] {code}", margin_x, y)
-        y -= 10 * mm
+        title = f"[{tool_name}] {code}"
+        y = _draw_heading(c, title, margin_x, y, level=2)
 
-        # ─ 기본 메타 정보 ─
-        y = _draw_kv(c, margin_x, y, "Category", tool_category or "-")
-        y = _draw_kv(c, margin_x, y, "Homepage", tool_homepage or "-")
-        if tool_desc:
-            y = _draw_kv(c, margin_x, y, "Description", tool_desc)
+        # 기본 정보
+        y = _draw_paragraph(c, f"Category: {category}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"Homepage: {homepage}", margin_x, y, 90, BODY_FONT)
+        if desc:
+            y = _draw_paragraph(c, f"Description: {desc}", margin_x, y, 90, BODY_FONT)
 
-        if not meta:
-            y = _draw_kv(c, margin_x, y, "Status", "최근 실행 결과가 존재하지 않습니다.")
-            y -= 10 * mm
-            continue
-
-        y = _ensure_page_space(c, y)
-
-        # ─ 실행 메타 ─
         run_dir = meta.get("run_dir", "-")
         output_dir = meta.get("output_dir", "-")
         rc = meta.get("rc")
@@ -550,31 +488,41 @@ def _draw_tool_sections(
         rc_str = "-" if rc is None else str(rc)
         dur_str = "-" if duration_ms is None else f"{duration_ms} ms"
 
-        y = _draw_kv(c, margin_x, y, "Run dir", str(run_dir))
-        y = _draw_kv(c, margin_x, y, "Output dir", str(output_dir))
-        y = _draw_kv(c, margin_x, y, "Exit code", rc_str)
-        y = _draw_kv(c, margin_x, y, "Duration", dur_str)
+        y = _draw_paragraph(c, f"Run dir: {run_dir}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"Output dir: {output_dir}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"Exit code: {rc_str}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"Duration: {dur_str}", margin_x, y, 90, BODY_FONT)
         if note:
-            y = _draw_kv(c, margin_x, y, "Note", note)
+            y = _draw_paragraph(c, f"Note: {note}", margin_x, y, 90, BODY_FONT)
 
-        # ─ 파일 요약 (상위 N개) ─
-        y = _ensure_page_space(c, y)
-        c.setFont(KOREAN_FONT_NAME, 13)
-        c.drawString(margin_x, y, "Generated Artifacts (Top N)")
-        y -= 8 * mm
-        c.setFont(KOREAN_FONT_NAME, 11)
+        # 산출물 요약
+        y = _draw_paragraph(
+            c,
+            "Generated Artifacts (Top N):",
+            margin_x,
+            y,
+            max_chars=90,
+            font_size=BODY_FONT,
+        )
+        top_files = sorted(
+            files, key=lambda f: f.get("mtime", 0), reverse=True
+        )[:8]
 
-        top_files = _summarize_files(files, max_files=8)
         if not top_files:
-            c.drawString(margin_x + 8 * mm, y, "- No files recorded in latest run.")
-            y -= 16 * mm
+            y = _draw_paragraph(
+                c,
+                "- No files recorded in latest run.",
+                margin_x + 6 * mm,
+                y,
+                90,
+                BODY_FONT,
+            )
         else:
             for f in top_files:
-                y = _ensure_page_space(c, y)
-                path = str(f.get("path"))
+                path = str(f.get("path", ""))
                 size = f.get("size")
                 mtime = f.get("mtime")
-                size_kb = "-" if size is None else f"{round(size / 1024, 1)} KB"
+                size_kb = "-" if size is None else f"{round(size/1024, 1)} KB"
                 mtime_str = (
                     "-"
                     if not mtime
@@ -583,171 +531,50 @@ def _draw_tool_sections(
                     )
                 )
 
-                lines = _wrap_text(path, 70)
-                c.drawString(margin_x + 8 * mm, y, f"- {lines[0]}")
-                y -= 14
-                for extra in lines[1:]:
-                    c.drawString(margin_x + 14 * mm, y, extra)
-                    y -= 14
-
-                c.drawString(
-                    margin_x + 14 * mm,
+                y = _draw_paragraph(
+                    c,
+                    f"- {path}",
+                    margin_x + 6 * mm,
                     y,
-                    f"(size={size_kb}, mtime={mtime_str})",
+                    95,
+                    BODY_FONT,
                 )
-                y -= 18
+                y = _draw_paragraph(
+                    c,
+                    f"  (size={size_kb}, mtime={mtime_str})",
+                    margin_x + 8 * mm,
+                    y,
+                    95,
+                    SMALL_FONT,
+                )
 
-        # 섹션 간 여백
-        y -= 10 * mm
-        y = _ensure_page_space(c, y)
-
-    c.showPage()
-
-
-# ──────────────────────────────────────────────
-# 6장. 증적 화면(스크린샷)
-# ──────────────────────────────────────────────
-def _collect_screenshot_files(meta: Optional[Dict[str, Any]], limit: int = 4) -> List[str]:
-    """
-    result.json 의 files 배열 중 이미지(screenshots/*, *.png/jpg/jpeg)를 찾아 상대경로 목록 반환.
-    """
-    if not meta:
-        return []
-    files = meta.get("files") or []
-    imgs: List[str] = []
-    for f in files:
-        p = str(f.get("path", ""))
-        lower = p.lower()
-        if not lower.endswith((".png", ".jpg", ".jpeg")):
-            continue
-        # screenshots 디렉터리 우선, 아니면 그냥 이미지 전체 허용
-        if "screenshots" in lower or True:
-            imgs.append(p)
-        if len(imgs) >= limit:
-            break
-    return imgs
-
-
-def _draw_screenshot_page(
-    c: canvas.Canvas,
-    title: str,
-    run_dir: str,
-    img_rel_paths: List[str],
-):
-    """
-    주어진 run_dir 기준 상대 이미지 경로 목록을 한 장(혹은 여러 장)에 배치.
-    """
-    if not img_rel_paths:
-        return
-
-    width, height = A4
-    margin_x = 15 * mm
-    base = os.path.abspath(run_dir)
-
-    y = height - 30 * mm
-    _draw_section_title(c, f"5. 증적 화면 - {title}", margin_x, y)
-    y -= 16 * mm
-
-    for rel in img_rel_paths:
-        img_path = os.path.abspath(os.path.join(base, rel))
-        if not os.path.isfile(img_path):
-            continue
-
-        # 이미지 하나당 여유 공간 확보
-        y = _ensure_page_space(c, y, min_y=80 * mm)
-
-        try:
-            img = ImageReader(img_path)
-        except Exception:
-            continue
-
-        img_w, img_h = img.getSize()
-        max_w = width - 2 * margin_x
-        max_h = 70 * mm
-        scale = min(max_w / img_w, max_h / img_h)
-        draw_w, draw_h = img_w * scale, img_h * scale
-
-        c.drawImage(img, margin_x, y - draw_h, width=draw_w, height=draw_h)
-        y -= draw_h + 4 * mm
-        c.setFont(KOREAN_FONT_NAME, 11)
-        c.drawString(margin_x, y, f"파일: {rel}")
-        y -= 16 * mm
+        y -= 10
+        y = _ensure_page_space(c, y, 4, font_size=BODY_FONT)
 
     c.showPage()
+    y = _new_page_y()
 
+    # ─────────────────────────────────────
+    # 5. 부록: 산출물 개요
+    # ─────────────────────────────────────
+    y = _draw_heading(c, "5. 부록 – 도구별 산출물 개요", margin_x, y, level=1)
 
-def _draw_all_screenshot_pages(
-    c: canvas.Canvas,
-    codes: List[str],
-    metas: Dict[str, Optional[Dict[str, Any]]],
-):
-    """
-    코드별로 스크린샷이 있으면 각 도구 당 1페이지씩 증적 화면 섹션을 만든다.
-    """
     for code in codes:
-        meta = metas.get(code)
-        if not meta:
-            continue
-        imgs = _collect_screenshot_files(meta, limit=4)
-        if not imgs:
-            continue
-        run_dir = meta.get("run_dir")
-        if not run_dir:
-            continue
+        meta = tool_meta.get(code) or {}
         item = get_item_by_code(code) or {}
         tool_name = item.get("name", code)
-        _draw_screenshot_page(c, tool_name, run_dir, imgs)
+        files = meta.get("files") or []
+        out_dir = meta.get("output_dir", "-")
 
+        summary = (
+            f"[{tool_name}] {code}\n"
+            f"· Output dir: {out_dir}\n"
+            f"· 기록된 산출물 개수: {len(files)}개\n"
+            "· 상세 내용은 SAGE Dashboard 또는 개별 리포트 파일(CSV/JSON/HTML/로그)에서 확인 가능"
+        )
+        y = _draw_paragraph(c, summary, margin_x, y, 90, BODY_FONT)
+        y -= 4
 
-# ──────────────────────────────────────────────
-# 메인 함수
-# ──────────────────────────────────────────────
-def generate_evidence_pdf(
-    codes: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    """
-    주어진 tool code들(Prowler/Custodian/Steampipe/Scout 등)의
-    '가장 최근 실행 결과'를 기반으로 KISA 스타일 PDF 증적 보고서 생성.
-
-    반환:
-    {
-      "pdf_path": 절대경로,
-      "run_dir_rel": "runs/evidence_pdf/20251113_153012",
-      "file_rel": "evidence_report.pdf"
-    }
-    """
-    if not codes:
-        # 기본 OSS 4종
-        codes = ["prowler", "custodian", "steampipe", "scout"]
-
-    metas = _load_metas_for_codes(codes)
-
-    out_dir = _safe_evidence_dir(EVIDENCE_ROOT)
-    pdf_filename = "evidence_report.pdf"
-    pdf_path = os.path.join(out_dir, pdf_filename)
-
-    c = canvas.Canvas(pdf_path, pagesize=A4)
-
-    # 1. 표지
-    _draw_cover_page(c, codes, metas)
-
-    # 2. 개요
-    _draw_overview_page(c, codes, metas)
-
-    # 3. 클라우드 취약점 분석·평가 요약 (표)
-    summary_rows = _build_cloud_summary_rows(codes, metas)
-    _draw_cloud_summary_table(c, summary_rows)
-
-    # 4. 세부 취약점 항목 (KISA 스타일 템플릿 2개 예시)
-    _draw_vuln_detail_pages(c, codes)
-
-    # 5. 도구별 실행 상세
-    _draw_tool_sections(c, codes, metas)
-
-    # 6. 증적 화면(스크린샷)
-    _draw_all_screenshot_pages(c, codes, metas)
-
-    # ─ 마지막 페이지 저장 ─
     c.save()
 
     run_dir_rel = os.path.relpath(out_dir, os.getcwd())
@@ -759,6 +586,9 @@ def generate_evidence_pdf(
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "pdf_file": file_rel,
         "codes": codes,
+        "aws_profile": aws_profile,
+        "aws_region": aws_region,
+        "frameworks": sorted(frameworks_all),
     }
     try:
         with open(meta_path, "w", encoding="utf-8") as f:
