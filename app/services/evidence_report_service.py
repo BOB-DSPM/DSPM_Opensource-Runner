@@ -1,6 +1,6 @@
 # ============================================
 # file: app/services/evidence_report_service.py
-# (SAGE 보고서 전용 새 구조 버전)
+# (SAGE 보고서 전용 - Platypus 기반 가독성 강화 버전)
 # ============================================
 from __future__ import annotations
 
@@ -12,10 +12,20 @@ from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    PageBreak,
+)
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
 from .oss_service import find_latest_result_for_code
 from ..utils.loader import get_item_by_code
@@ -37,7 +47,7 @@ except Exception as e:
     # 실패해도 기본 폰트로라도 생성되도록만 함
     print(f"[WARN] Failed to register Korean font '{KOREAN_FONT_NAME}': {e}")
 
-# 레이아웃 상수 (줄 간격 넉넉하게)
+# 레이아웃 상수
 TOP_MARGIN_MM = 30
 BOTTOM_MARGIN_MM = 25
 TITLE_FONT = 22
@@ -45,6 +55,92 @@ SECTION_TITLE_FONT = 16
 SUBTITLE_FONT = 13
 BODY_FONT = 11
 SMALL_FONT = 9
+
+
+# ──────────────────────────────────────────────
+# 스타일 정의
+# ──────────────────────────────────────────────
+def _build_styles():
+    base = getSampleStyleSheet()
+
+    title = ParagraphStyle(
+        "TITLE",
+        parent=base["Heading1"],
+        fontName=KOREAN_FONT_NAME,
+        fontSize=TITLE_FONT,
+        leading=TITLE_FONT + 4,
+        spaceAfter=8,
+    )
+
+    subtitle = ParagraphStyle(
+        "SUBTITLE",
+        parent=base["Heading2"],
+        fontName=KOREAN_FONT_NAME,
+        fontSize=TITLE_FONT,
+        leading=TITLE_FONT + 4,
+        textColor=colors.HexColor("#333333"),
+        spaceAfter=16,
+    )
+
+    section = ParagraphStyle(
+        "SECTION",
+        parent=base["Heading2"],
+        fontName=KOREAN_FONT_NAME,
+        fontSize=SECTION_TITLE_FONT,
+        leading=SECTION_TITLE_FONT + 4,
+        textColor=colors.HexColor("#1f4287"),
+        spaceBefore=8,
+        spaceAfter=12,
+    )
+
+    subsection = ParagraphStyle(
+        "SUBSECTION",
+        parent=base["Heading3"],
+        fontName=KOREAN_FONT_NAME,
+        fontSize=SUBTITLE_FONT,
+        leading=SUBTITLE_FONT + 4,
+        textColor=colors.HexColor("#1f4287"),
+        spaceBefore=6,
+        spaceAfter=6,
+    )
+
+    body = ParagraphStyle(
+        "BODY",
+        parent=base["BodyText"],
+        fontName=KOREAN_FONT_NAME,
+        fontSize=BODY_FONT,
+        leading=BODY_FONT + 6,  # 줄간 넉넉
+        spaceAfter=2,
+    )
+
+    small = ParagraphStyle(
+        "SMALL",
+        parent=base["BodyText"],
+        fontName=KOREAN_FONT_NAME,
+        fontSize=SMALL_FONT,
+        leading=SMALL_FONT + 4,
+        textColor=colors.HexColor("#555555"),
+        spaceAfter=1,
+    )
+
+    bullet = ParagraphStyle(
+        "BULLET",
+        parent=body,
+        leftIndent=10 * mm,
+        bulletIndent=5 * mm,
+        bulletFontName=KOREAN_FONT_NAME,
+        bulletFontSize=BODY_FONT,
+    )
+
+    return {
+        "TITLE": title,
+        "SUBTITLE": subtitle,
+        "SECTION": section,
+        "SUBSECTION": subsection,
+        "BODY": body,
+        "SMALL": small,
+        "BULLET": bullet,
+    }
 
 
 # ──────────────────────────────────────────────
@@ -56,101 +152,6 @@ def _safe_evidence_dir(base_dir: str = EVIDENCE_ROOT) -> str:
     path = os.path.abspath(os.path.join(base_dir, ts))
     os.makedirs(path, exist_ok=True)
     return path
-
-
-def _wrap_text(text: str, max_chars: int) -> List[str]:
-    """
-    아주 단순한 단어 기준 줄바꿈 유틸.
-    - ReportLab에서 긴 문자열을 섹션별로 줄바꿈하기 위함.
-    """
-    lines: List[str] = []
-    for raw_line in (text or "").split("\n"):
-        line = raw_line.rstrip()
-        if not line:
-            lines.append("")
-            continue
-        current = ""
-        for word in line.split(" "):
-            if not current:
-                current = word
-            elif len(current) + 1 + len(word) <= max_chars:
-                current += " " + word
-            else:
-                lines.append(current)
-                current = word
-        if current:
-            lines.append(current)
-    return lines
-
-
-def _new_page_y() -> float:
-    return A4[1] - TOP_MARGIN_MM * mm
-
-
-def _ensure_page_space(
-    c: canvas.Canvas,
-    y: float,
-    lines: int,
-    font_size: int = BODY_FONT,
-) -> float:
-    """
-    필요한 줄 수 기준으로 여백이 부족하면 새 페이지로 넘김.
-    """
-    bottom = BOTTOM_MARGIN_MM * mm
-    leading = font_size + 6  # 줄 간격 넉넉하게
-    if y - lines * leading < bottom:
-        c.showPage()
-        return _new_page_y()
-    return y
-
-
-def _draw_paragraph(
-    c: canvas.Canvas,
-    text: str,
-    x: float,
-    y: float,
-    max_chars: int = 80,
-    font_size: int = BODY_FONT,
-) -> float:
-    """
-    여러 줄 문단 출력.
-    반환값: 마지막 줄 다음 y 좌표
-    """
-    lines = _wrap_text(text, max_chars)
-    if not lines:
-        return y
-
-    y = _ensure_page_space(c, y, len(lines), font_size=font_size)
-    c.setFont(KOREAN_FONT_NAME, font_size)
-    leading = font_size + 6
-
-    for line in lines:
-        c.drawString(x, y, line)
-        y -= leading
-    return y
-
-
-def _draw_heading(
-    c: canvas.Canvas,
-    text: str,
-    x: float,
-    y: float,
-    level: int = 1,
-) -> float:
-    """
-    level 1: 큰 섹션 제목
-    level 2: subsecion 제목
-    """
-    if level == 1:
-        font_size = SECTION_TITLE_FONT
-    else:
-        font_size = SUBTITLE_FONT
-
-    y = _ensure_page_space(c, y, 2, font_size=font_size)
-    c.setFont(KOREAN_FONT_NAME, font_size)
-    c.drawString(x, y, text)
-    y -= font_size + 8
-    return y
 
 
 def _extract_common_context(tool_meta: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -201,6 +202,37 @@ def _detect_frameworks_from_files(files: List[Dict[str, Any]]) -> List[str]:
             if key in path:
                 found.add(label)
     return sorted(found)
+
+
+def _extract_severity_stats(tool_meta: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, int]]:
+    """
+    각 도구 payload에서 severity 통계를 읽어옴.
+    payload.severity_stats 가 있다면 사용, 없으면 0으로 세팅.
+    구조 예:
+      payload: {
+        "severity_stats": {
+          "HIGH": 10,
+          "MEDIUM": 20,
+          "LOW": 5,
+          "TOTAL": 35
+        }
+      }
+    """
+    result: Dict[str, Dict[str, int]] = {}
+    for code, meta in tool_meta.items():
+        payload = meta.get("payload") or {}
+        stats = payload.get("severity_stats") or {}
+        high = int(stats.get("HIGH", 0) or 0)
+        medium = int(stats.get("MEDIUM", 0) or 0)
+        low = int(stats.get("LOW", 0) or 0)
+        total = int(stats.get("TOTAL", high + medium + low) or (high + medium + low))
+        result[code] = {
+            "HIGH": high,
+            "MEDIUM": medium,
+            "LOW": low,
+            "TOTAL": total,
+        }
+    return result
 
 
 # ──────────────────────────────────────────────
@@ -287,16 +319,19 @@ def generate_evidence_pdf(
 ) -> Dict[str, Any]:
     """
     SAGE 보고서 구조에 맞춰 PDF 증적 보고서를 생성한다.
+    (Platypus 기반: 자동 줄바꿈 + 표 레이아웃 + 통계 테이블)
 
     반환:
     {
       "pdf_path": 절대경로,
       "run_dir_rel": "runs/evidence_pdf/20251113_153012",
-      "file_rel": "SAGE_report.pdf"
+      "file_rel": "evidence_report.pdf"
     }
     """
     if not codes:
         codes = list(DEFAULT_TOOL_CODES)
+
+    styles = _build_styles()
 
     # 1) 각 도구별 latest result 메타 로딩
     tool_meta: Dict[str, Dict[str, Any]] = {}
@@ -307,159 +342,253 @@ def generate_evidence_pdf(
     # 산출물 카운트 및 프레임워크 감지
     artifact_counts: Dict[str, int] = {}
     frameworks_all = set()
+    all_files_for_fw: List[Dict[str, Any]] = []
+
     for code, meta in tool_meta.items():
         files = meta.get("files") or []
         artifact_counts[code] = len(files)
-        for fw in _detect_frameworks_from_files(files):
-            frameworks_all.add(fw)
+        all_files_for_fw.extend(files)
+
+    for fw in _detect_frameworks_from_files(all_files_for_fw):
+        frameworks_all.add(fw)
 
     context = _extract_common_context(tool_meta)
     aws_profile = context["profile"]
     aws_region = context["region"]
-    frameworks_str = ", ".join(sorted(frameworks_all)) if frameworks_all else "-"
+
+    frameworks_list = sorted(frameworks_all)
+    frameworks_str = ", ".join(frameworks_list) if frameworks_list else "-"
+
+    # severity 요약 (payload에 있으면 사용)
+    severity_stats = _extract_severity_stats(tool_meta)
+
+    # 도구 라벨
+    tool_labels: Dict[str, str] = {}
+    for code in codes:
+        item = get_item_by_code(code) or {}
+        tool_labels[code] = item.get("name", code)
+
+    total_artifacts = sum(artifact_counts.values())
+    tools_label_str = ", ".join(tool_labels[c] for c in codes)
 
     # 2) PDF 준비
     out_dir = _safe_evidence_dir(EVIDENCE_ROOT)
     pdf_filename = "evidence_report.pdf"
     pdf_path = os.path.join(out_dir, pdf_filename)
 
-    c = canvas.Canvas(pdf_path, pagesize=A4)
-    width, height = A4
-    margin_x = 25 * mm
-    y = _new_page_y()
+    doc = SimpleDocTemplate(
+        pdf_path,
+        pagesize=A4,
+        leftMargin=25 * mm,
+        rightMargin=25 * mm,
+        topMargin=TOP_MARGIN_MM * mm,
+        bottomMargin=BOTTOM_MARGIN_MM * mm,
+    )
+
+    story: List[Any] = []
 
     # ─────────────────────────────────────
     # 0. 표지
     # ─────────────────────────────────────
-    c.setFont(KOREAN_FONT_NAME, TITLE_FONT)
-    c.drawString(margin_x, y, "SAGE 클라우드 보안·컴플라이언스")
-    y -= TITLE_FONT + 10
-    c.drawString(margin_x, y, "취약점 분석·평가 증적 보고서")
-    y -= TITLE_FONT + 20
-
-    c.setFont(KOREAN_FONT_NAME, SUBTITLE_FONT)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.drawString(margin_x, y, f"작성일시: {now_str}")
-    y -= SUBTITLE_FONT + 8
-    c.drawString(margin_x, y, f"AWS Profile: {aws_profile}")
-    y -= SUBTITLE_FONT + 8
-    c.drawString(margin_x, y, f"대상 리전: {aws_region}")
-    y -= SUBTITLE_FONT + 8
 
-    tools_label = ", ".join(
-        get_item_by_code(code).get("name", code)
-        if get_item_by_code(code)
-        else code
-        for code in codes
-    )
-    c.drawString(margin_x, y, f"사용 도구: {tools_label}")
-    y -= SUBTITLE_FONT + 14
+    story.append(Paragraph("SAGE 클라우드 보안·컴플라이언스", styles["TITLE"]))
+    story.append(Paragraph("취약점 분석·평가 증적 보고서", styles["SUBTITLE"]))
+    story.append(Spacer(1, 6))
 
-    c.setFont(KOREAN_FONT_NAME, SMALL_FONT)
-    c.drawString(
-        margin_x,
-        y,
-        "※ 본 문서는 SAGE Dashboard에서 실행된 오픈소스 보안/컴플라이언스 도구의 최신 결과를 기반으로 생성되었습니다.",
+    story.append(Paragraph(f"작성일시: {now_str}", styles["BODY"]))
+    story.append(Paragraph(f"AWS Profile: {aws_profile}", styles["BODY"]))
+    story.append(Paragraph(f"대상 리전: {aws_region}", styles["BODY"]))
+    story.append(Paragraph(f"사용 도구: {tools_label_str}", styles["BODY"]))
+    story.append(Spacer(1, 10))
+
+    story.append(
+        Paragraph(
+            "※ 본 문서는 SAGE Dashboard에서 실행된 오픈소스 보안/컴플라이언스 도구의 최신 결과를 기반으로 생성되었습니다.",
+            styles["SMALL"],
+        )
     )
 
-    c.showPage()
-    y = _new_page_y()
+    story.append(PageBreak())
 
     # ─────────────────────────────────────
     # 1. 종합 요약 (Executive Summary)
     # ─────────────────────────────────────
-    y = _draw_heading(c, "1. 종합 요약 (Executive Summary)", margin_x, y, level=1)
+    story.append(Paragraph("1. 종합 요약 (Executive Summary)", styles["SECTION"]))
 
     # 1-1 전체 점검 개요
-    y = _draw_heading(c, "1-1. 전체 점검 개요", margin_x, y, level=2)
-    total_artifacts = sum(artifact_counts.values())
-    text = (
-        f"이번 점검은 AWS Profile '{aws_profile}' 환경을 대상으로, "
-        f"{tools_label} 4종 도구를 활용하여 클라우드 보안·컴플라이언스 구성을 분석·평가하였다. "
-        f"각 도구의 최신 실행 결과 기준으로 총 {total_artifacts}개 이상의 산출물(리포트/로그/JSON 등)이 생성되었다."
+    story.append(Paragraph("1-1. 전체 점검 개요", styles["SUBSECTION"]))
+    story.append(
+        Paragraph(
+            (
+                f"이번 점검은 AWS Profile '<b>{aws_profile}</b>' 환경을 대상으로, "
+                f"<b>{tools_label_str}</b> {len(codes)}종 도구를 활용하여 클라우드 보안·컴플라이언스 구성을 분석·평가하였다. "
+                f"각 도구의 최신 실행 결과 기준으로 총 <b>{total_artifacts}</b>개 이상의 산출물(리포트/로그/JSON 등)이 생성되었다."
+            ),
+            styles["BODY"],
+        )
     )
-    y = _draw_paragraph(c, text, margin_x, y, max_chars=80, font_size=BODY_FONT)
-    y -= 6
+    story.append(Spacer(1, 6))
 
-    # 1-2 규제·컴플라이언스 프레임워크 관점 요약
-    y = _draw_heading(c, "1-2. 규제·컴플라이언스 관점 요약", margin_x, y, level=2)
+    # 요약 표 (환경/기본정보)
+    summary_table_data = [
+        ["항목", "값"],
+        ["AWS Profile", aws_profile],
+        ["Region", aws_region],
+        ["총 산출물 개수", str(total_artifacts)],
+        ["사용 도구", tools_label_str],
+    ]
+    summary_table = Table(summary_table_data, colWidths=[40 * mm, 110 * mm])
+    summary_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e0e7ff")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#111827")),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#9ca3af")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d1d5db")),
+                ("FONTNAME", (0, 0), (-1, -1), KOREAN_FONT_NAME),
+                ("FONTSIZE", (0, 0), (-1, -1), 10),
+                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]),
+            ]
+        )
+    )
+    story.append(summary_table)
+    story.append(Spacer(1, 12))
+
+    # 1-2 규제·컴플라이언스 관점 요약
+    story.append(Paragraph("1-2. 규제·컴플라이언스 관점 요약", styles["SUBSECTION"]))
     if frameworks_str != "-":
-        text = (
-            "도구 산출물 분석 결과, 다음 컴플라이언스 프레임워크 관점의 점검 결과가 생성되었다: "
-            f"{frameworks_str}. "
-            "각 프레임워크별 상세 위반 여부·항목은 개별 CSV/JSON 리포트에서 확인할 수 있다."
+        story.append(
+            Paragraph(
+                (
+                    "도구 산출물 분석 결과, 다음 컴플라이언스 프레임워크 관점의 점검 결과가 생성되었다: "
+                    f"<b>{frameworks_str}</b>. "
+                    "각 프레임워크별 상세 위반 여부·항목은 개별 CSV/JSON 리포트에서 확인할 수 있다."
+                ),
+                styles["BODY"],
+            )
         )
     else:
-        text = (
-            "현재 수집된 산출물에서는 특정 규제·컴플라이언스 프레임워크명을 식별하지 못하였다. "
-            "Prowler/Steampipe 등의 출력 포맷 및 파일명을 기반으로 후속 분석이 가능하다."
+        story.append(
+            Paragraph(
+                (
+                    "현재 수집된 산출물에서는 특정 규제·컴플라이언스 프레임워크명을 식별하지 못하였다. "
+                    "Prowler/Steampipe 등의 출력 포맷 및 파일명을 기반으로 후속 분석이 가능하다."
+                ),
+                styles["BODY"],
+            )
         )
-    y = _draw_paragraph(c, text, margin_x, y, max_chars=80, font_size=BODY_FONT)
-    y -= 6
+    story.append(Spacer(1, 8))
 
-    # 1-3 개선 우선순위 (템플릿)
-    y = _draw_heading(c, "1-3. 개선 우선순위(템플릿)", margin_x, y, level=2)
+    # 1-3 위험도/심각도 요약 테이블
+    story.append(Paragraph("1-3. 위험도(Severity) 요약", styles["SUBSECTION"]))
+
+    sev_table_data = [["도구", "HIGH", "MEDIUM", "LOW", "TOTAL"]]
+    for code in codes:
+        label = tool_labels.get(code, code)
+        sev = severity_stats.get(code, {"HIGH": 0, "MEDIUM": 0, "LOW": 0, "TOTAL": 0})
+        sev_table_data.append(
+            [
+                label,
+                str(sev["HIGH"]),
+                str(sev["MEDIUM"]),
+                str(sev["LOW"]),
+                str(sev["TOTAL"]),
+            ]
+        )
+
+    sev_table = Table(sev_table_data, colWidths=[45 * mm, 22 * mm, 22 * mm, 22 * mm, 22 * mm])
+    sev_table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#fee2e2")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#7f1d1d")),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#fecaca")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#fecaca")),
+                ("FONTNAME", (0, 0), (-1, -1), KOREAN_FONT_NAME),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("ALIGN", (1, 1), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fef2f2")]),
+            ]
+        )
+    )
+    story.append(sev_table)
+    story.append(Spacer(1, 12))
+
+    # 1-4 개선 우선순위 (템플릿)
+    story.append(Paragraph("1-4. 개선 우선순위(템플릿)", styles["SUBSECTION"]))
     priority_lines = [
-        "① CA-03 클라우드 계정 루트·관리자 권한 관리",
-        "② LG-01 클라우드 감사 로그(CloudTrail 등) 설정 보강",
-        "③ (선택) 스토리지·네트워크·암호화 등 추가 통제 항목",
+        "CA-03: 클라우드 계정 루트·관리자 권한 관리 강화",
+        "LG-01: CloudTrail·Config 등 감사 로그 활성화 및 장기 보존 설정",
+        "기타: 스토리지·네트워크·암호화 등 추가 통제 항목 검토",
     ]
     for line in priority_lines:
-        y = _draw_paragraph(c, f"- {line}", margin_x, y, max_chars=80, font_size=BODY_FONT)
-    y -= 4
+        story.append(Paragraph(f"• {line}", styles["BODY"]))
 
-    c.showPage()
-    y = _new_page_y()
+    story.append(PageBreak())
 
     # ─────────────────────────────────────
     # 2. 컴플라이언스 관점 요약
     # ─────────────────────────────────────
-    y = _draw_heading(c, "2. 컴플라이언스 관점 요약", margin_x, y, level=1)
+    story.append(Paragraph("2. 컴플라이언스 관점 요약", styles["SECTION"]))
 
     for item in DETAILED_ITEMS:
-        summary = (
-            f"[{item['code']}] {item['area']} – {item['title']}\n"
-            f"· 관련 규제: ISMS-P / ISO27001 / (환경에 따라 추가 매핑)\n"
-            f"· 영향도: High (템플릿 기준)\n"
-            f"· 근거 도구: {item['tools']}"
+        story.append(
+            Paragraph(
+                f"[{item['code']}] {item['area']} – {item['title']}",
+                styles["SUBSECTION"],
+            )
         )
-        y = _draw_paragraph(c, summary, margin_x, y, max_chars=90, font_size=BODY_FONT)
-        y -= 4
+        story.append(
+            Paragraph(
+                "· 관련 규제: ISMS-P / ISO27001 / (환경에 따라 추가 매핑)",
+                styles["BODY"],
+            )
+        )
+        story.append(Paragraph("· 영향도: High (템플릿 기준)", styles["BODY"]))
+        story.append(
+            Paragraph(f"· 근거 도구: {item['tools']}", styles["BODY"])
+        )
+        story.append(Spacer(1, 6))
 
-    c.showPage()
-    y = _new_page_y()
+    story.append(PageBreak())
 
     # ─────────────────────────────────────
     # 3. 세부 취약점 항목
     # ─────────────────────────────────────
-    y = _draw_heading(c, "3. 세부 취약점 항목", margin_x, y, level=1)
+    story.append(Paragraph("3. 세부 취약점 항목", styles["SECTION"]))
 
     for item in DETAILED_ITEMS:
-        title = f"3. 세부 취약점 항목 - {item['code']} {item['title']}"
-        y = _draw_heading(c, title, margin_x, y, level=2)
+        story.append(
+            Paragraph(
+                f"{item['code']} {item['title']}",
+                styles["SUBSECTION"],
+            )
+        )
+        story.append(Paragraph(f"<b>취약점 개요</b>: {item['overview']}", styles["BODY"]))
+        story.append(Paragraph(f"<b>점검 내용</b>: {item['check']}", styles["BODY"]))
+        story.append(Paragraph(f"<b>점검 목적</b>: {item['purpose']}", styles["BODY"]))
+        story.append(Paragraph(f"<b>보안 위협</b>: {item['risk']}", styles["BODY"]))
+        story.append(Paragraph(f"<b>점검 대상 도구</b>: {item['tools']}", styles["BODY"]))
+        story.append(Paragraph(f"<b>판단 기준(양호)</b>: {item['good']}", styles["BODY"]))
+        story.append(Paragraph(f"<b>판단 기준(취약)</b>: {item['bad']}", styles["BODY"]))
+        story.append(Spacer(1, 4))
 
-        y = _draw_paragraph(c, f"취약점 개요: {item['overview']}", margin_x, y, 90, BODY_FONT)
-        y = _draw_paragraph(c, f"점검 내용: {item['check']}", margin_x, y, 90, BODY_FONT)
-        y = _draw_paragraph(c, f"점검 목적: {item['purpose']}", margin_x, y, 90, BODY_FONT)
-        y = _draw_paragraph(c, f"보안 위협: {item['risk']}", margin_x, y, 90, BODY_FONT)
-        y = _draw_paragraph(c, f"점검 대상 도구: {item['tools']}", margin_x, y, 90, BODY_FONT)
-        y = _draw_paragraph(c, f"판단 기준(양호): {item['good']}", margin_x, y, 90, BODY_FONT)
-        y = _draw_paragraph(c, f"판단 기준(취약): {item['bad']}", margin_x, y, 90, BODY_FONT)
-
-        y = _draw_paragraph(c, "점검 및 조치 사례:", margin_x, y, 90, BODY_FONT)
+        story.append(Paragraph("<b>점검 및 조치 사례</b>", styles["BODY"]))
         for idx, step in enumerate(item["steps"], start=1):
-            y = _draw_paragraph(c, f"Step {idx}: {step}", margin_x + 6 * mm, y, 88, BODY_FONT)
+            story.append(Paragraph(f"{idx}. {step}", styles["BODY"]))
 
-        y -= 8
-        y = _ensure_page_space(c, y, 3, font_size=BODY_FONT)
+        story.append(Spacer(1, 10))
 
-    c.showPage()
-    y = _new_page_y()
+    story.append(PageBreak())
 
     # ─────────────────────────────────────
     # 4. 도구별 실행 상세
     # ─────────────────────────────────────
-    y = _draw_heading(c, "4. 도구별 실행 상세", margin_x, y, level=1)
+    story.append(Paragraph("4. 도구별 실행 상세", styles["SECTION"]))
 
     for code in codes:
         meta = tool_meta.get(code) or {}
@@ -469,14 +598,34 @@ def generate_evidence_pdf(
         homepage = item.get("homepage", "-")
         desc = item.get("desc", "")
 
-        title = f"[{tool_name}] {code}"
-        y = _draw_heading(c, title, margin_x, y, level=2)
+        story.append(
+            Paragraph(
+                f"[{tool_name}] ({code})",
+                styles["SUBSECTION"],
+            )
+        )
 
-        # 기본 정보
-        y = _draw_paragraph(c, f"Category: {category}", margin_x, y, 90, BODY_FONT)
-        y = _draw_paragraph(c, f"Homepage: {homepage}", margin_x, y, 90, BODY_FONT)
-        if desc:
-            y = _draw_paragraph(c, f"Description: {desc}", margin_x, y, 90, BODY_FONT)
+        info_table_data = [
+            ["항목", "값"],
+            ["Category", category],
+            ["Homepage", homepage],
+            ["Description", desc or "-"],
+        ]
+        info_table = Table(info_table_data, colWidths=[30 * mm, 120 * mm])
+        info_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e5e7eb")),
+                    ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#9ca3af")),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d4d4d8")),
+                    ("FONTNAME", (0, 0), (-1, -1), KOREAN_FONT_NAME),
+                    ("FONTSIZE", (0, 0), (-1, -1), 9),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]
+            )
+        )
+        story.append(info_table)
+        story.append(Spacer(1, 4))
 
         run_dir = meta.get("run_dir", "-")
         output_dir = meta.get("output_dir", "-")
@@ -488,94 +637,94 @@ def generate_evidence_pdf(
         rc_str = "-" if rc is None else str(rc)
         dur_str = "-" if duration_ms is None else f"{duration_ms} ms"
 
-        y = _draw_paragraph(c, f"Run dir: {run_dir}", margin_x, y, 90, BODY_FONT)
-        y = _draw_paragraph(c, f"Output dir: {output_dir}", margin_x, y, 90, BODY_FONT)
-        y = _draw_paragraph(c, f"Exit code: {rc_str}", margin_x, y, 90, BODY_FONT)
-        y = _draw_paragraph(c, f"Duration: {dur_str}", margin_x, y, 90, BODY_FONT)
+        exec_table_data = [
+            ["실행 항목", "값"],
+            ["Run dir", run_dir],
+            ["Output dir", output_dir],
+            ["Exit code", rc_str],
+            ["Duration", dur_str],
+        ]
         if note:
-            y = _draw_paragraph(c, f"Note: {note}", margin_x, y, 90, BODY_FONT)
+            exec_table_data.append(["Note", note])
 
-        # 산출물 요약
-        y = _draw_paragraph(
-            c,
-            "Generated Artifacts (Top N):",
-            margin_x,
-            y,
-            max_chars=90,
-            font_size=BODY_FONT,
+        exec_table = Table(exec_table_data, colWidths=[30 * mm, 120 * mm])
+        exec_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eef2ff")),
+                    ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#9ca3af")),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#c7d2fe")),
+                    ("FONTNAME", (0, 0), (-1, -1), KOREAN_FONT_NAME),
+                    ("FONTSIZE", (0, 0), (-1, -1), 9),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]
+            )
         )
-        top_files = sorted(
-            files, key=lambda f: f.get("mtime", 0), reverse=True
-        )[:8]
+        story.append(exec_table)
+        story.append(Spacer(1, 6))
+
+        # 산출물 요약 (Top N)
+        story.append(Paragraph("<b>Generated Artifacts (Top N)</b>", styles["BODY"]))
+        top_files = sorted(files, key=lambda f: f.get("mtime", 0) or 0, reverse=True)[:8]
 
         if not top_files:
-            y = _draw_paragraph(
-                c,
-                "- No files recorded in latest run.",
-                margin_x + 6 * mm,
-                y,
-                90,
-                BODY_FONT,
-            )
+            story.append(Paragraph("- No files recorded in latest run.", styles["BODY"]))
         else:
             for f in top_files:
                 path = str(f.get("path", ""))
                 size = f.get("size")
                 mtime = f.get("mtime")
-                size_kb = "-" if size is None else f"{round(size/1024, 1)} KB"
+                size_kb = "-" if size is None else f"{round(size / 1024, 1)} KB"
                 mtime_str = (
                     "-"
                     if not mtime
-                    else datetime.fromtimestamp(mtime).strftime(
-                        "%Y-%m-%d %H:%M:%S"
+                    else datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                )
+
+                story.append(
+                    Paragraph(f"• {path}", styles["BODY"])
+                )
+                story.append(
+                    Paragraph(
+                        f"&nbsp;&nbsp;(size={size_kb}, mtime={mtime_str})",
+                        styles["SMALL"],
                     )
                 )
 
-                y = _draw_paragraph(
-                    c,
-                    f"- {path}",
-                    margin_x + 6 * mm,
-                    y,
-                    95,
-                    BODY_FONT,
-                )
-                y = _draw_paragraph(
-                    c,
-                    f"  (size={size_kb}, mtime={mtime_str})",
-                    margin_x + 8 * mm,
-                    y,
-                    95,
-                    SMALL_FONT,
-                )
+        story.append(Spacer(1, 10))
 
-        y -= 10
-        y = _ensure_page_space(c, y, 4, font_size=BODY_FONT)
-
-    c.showPage()
-    y = _new_page_y()
+    story.append(PageBreak())
 
     # ─────────────────────────────────────
     # 5. 부록: 산출물 개요
     # ─────────────────────────────────────
-    y = _draw_heading(c, "5. 부록 – 도구별 산출물 개요", margin_x, y, level=1)
+    story.append(Paragraph("5. 부록 – 도구별 산출물 개요", styles["SECTION"]))
 
     for code in codes:
         meta = tool_meta.get(code) or {}
         item = get_item_by_code(code) or {}
         tool_name = item.get("name", code)
         files = meta.get("files") or []
-        out_dir = meta.get("output_dir", "-")
+        out_dir_tool = meta.get("output_dir", "-")
 
-        summary = (
-            f"[{tool_name}] {code}\n"
-            f"· Output dir: {out_dir}\n"
-            f"· 기록된 산출물 개수: {len(files)}개\n"
-            "· 상세 내용은 SAGE Dashboard 또는 개별 리포트 파일(CSV/JSON/HTML/로그)에서 확인 가능"
+        story.append(
+            Paragraph(
+                f"[{tool_name}] ({code})",
+                styles["SUBSECTION"],
+            )
         )
-        y = _draw_paragraph(c, summary, margin_x, y, 90, BODY_FONT)
-        y -= 4
+        story.append(
+            Paragraph(
+                f"· Output dir: {out_dir_tool}<br/>"
+                f"· 기록된 산출물 개수: <b>{len(files)}</b>개<br/>"
+                "· 상세 내용은 SAGE Dashboard 또는 개별 리포트 파일(CSV/JSON/HTML/로그)에서 확인 가능",
+                styles["BODY"],
+            )
+        )
+        story.append(Spacer(1, 6))
 
-    c.save()
+    # 실제 PDF 생성
+    doc.build(story)
 
     run_dir_rel = os.path.relpath(out_dir, os.getcwd())
     file_rel = os.path.relpath(pdf_path, out_dir)  # "evidence_report.pdf"
@@ -588,7 +737,9 @@ def generate_evidence_pdf(
         "codes": codes,
         "aws_profile": aws_profile,
         "aws_region": aws_region,
-        "frameworks": sorted(frameworks_all),
+        "frameworks": frameworks_list,
+        "severity_stats": severity_stats,
+        "artifact_counts": artifact_counts,
     }
     try:
         with open(meta_path, "w", encoding="utf-8") as f:
