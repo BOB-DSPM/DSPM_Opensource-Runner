@@ -1,6 +1,6 @@
 # ============================================
 # file: app/services/evidence_report_service.py
-# (KISA 스타일 섹션 + 스크린샷 증적 포함 버전)
+# (KISA 스타일 섹션 + 스크린샷 증적 포함, 폰트 크게 보기 좋게)
 # ============================================
 from __future__ import annotations
 
@@ -77,36 +77,43 @@ def _wrap_text(text: str, max_chars: int) -> List[str]:
 
 
 def _draw_section_title(c: canvas.Canvas, text: str, x: float, y: float):
-    # 제목은 약간 크게
-    c.setFont(KOREAN_FONT_NAME, 14)
+    """
+    섹션 제목: 크게(16pt) + 본문 기본 폰트 12pt로 세팅.
+    """
+    c.setFont(KOREAN_FONT_NAME, 16)
     c.drawString(x, y, text)
-    c.setFont(KOREAN_FONT_NAME, 10)
+    c.setFont(KOREAN_FONT_NAME, 12)
 
 
 def _draw_kv(c: canvas.Canvas, x: float, y: float, key: str, value: str) -> float:
     """
     key: value 형태 한 줄 출력. 여러 줄로 감싸질 수 있음.
+    - 폰트: 12pt
+    - 줄 간격: 16pt 수준으로 좀 넉넉하게
     반환값: 다음 줄 y 좌표.
     """
-    max_chars = 90
+    max_chars = 70  # 폰트 키웠으니 줄당 글자 수를 조금 줄임
     lines = _wrap_text(str(value or ""), max_chars)
 
     # key
-    c.setFont(KOREAN_FONT_NAME, 9)
+    c.setFont(KOREAN_FONT_NAME, 12)
     c.drawString(x, y, f"{key}:")
     # value
-    offset_x = x + 40  # value 들여쓰기
-    c.setFont(KOREAN_FONT_NAME, 9)
+    offset_x = x + 50  # value 들여쓰기 조금 더
+    c.setFont(KOREAN_FONT_NAME, 12)
 
     first = True
+    line_gap = 16  # 줄 간격
+
     for line in lines:
         if first:
             c.drawString(offset_x, y, line)
             first = False
         else:
-            y -= 11
+            y -= line_gap
             c.drawString(offset_x, y, line)
-    return y - 14  # 다음 항목 y
+    # 다음 항목 간 간격
+    return y - (line_gap // 2)
 
 
 def _ensure_page_space(c: canvas.Canvas, y: float, min_y: float = 40 * mm) -> float:
@@ -151,13 +158,14 @@ def _draw_cover_page(
     margin_x = 25 * mm
     y = height - 60 * mm
 
-    c.setFont(KOREAN_FONT_NAME, 24)
+    # 제목 크게
+    c.setFont(KOREAN_FONT_NAME, 26)
     c.drawString(margin_x, y, "SAGE 클라우드 보안 / 컴플라이언스")
-    y -= 16 * mm
+    y -= 18 * mm
     c.drawString(margin_x, y, "취약점 분석·평가 증적 보고서")
-    y -= 25 * mm
+    y -= 30 * mm
 
-    c.setFont(KOREAN_FONT_NAME, 12)
+    c.setFont(KOREAN_FONT_NAME, 14)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.drawString(margin_x, y, f"작성일시: {now_str}")
     y -= 10 * mm
@@ -166,15 +174,14 @@ def _draw_cover_page(
     c.drawString(margin_x, y, f"AWS Profile: {aws_profile}")
     y -= 10 * mm
 
-    # 사용 도구
     tool_names: List[str] = []
     for code in codes:
         item = get_item_by_code(code) or {}
         tool_names.append(item.get("name", code))
     c.drawString(margin_x, y, "사용 도구: " + ", ".join(tool_names))
-    y -= 10 * mm
+    y -= 14 * mm
 
-    c.setFont(KOREAN_FONT_NAME, 10)
+    c.setFont(KOREAN_FONT_NAME, 12)
     c.drawString(
         margin_x,
         y,
@@ -197,7 +204,7 @@ def _draw_overview_page(
     y = height - 30 * mm
 
     _draw_section_title(c, "1. 개요", margin_x, y)
-    y -= 10 * mm
+    y -= 14 * mm
 
     aws_profile = os.environ.get("AWS_PROFILE", "default")
     regions: List[str] = []
@@ -227,13 +234,14 @@ def _draw_overview_page(
         item = get_item_by_code(code) or {}
         tool_name = item.get("name", code)
 
+        y -= 8 * mm
         y = _ensure_page_space(c, y)
         _draw_section_title(c, f"- {tool_name} 최신 실행 요약", margin_x, y)
-        y -= 8 * mm
+        y -= 10 * mm
 
         if not meta:
             y = _draw_kv(c, margin_x, y, "상태", "최근 실행 결과가 존재하지 않습니다.")
-            y -= 4 * mm
+            y -= 6 * mm
             continue
 
         rc = meta.get("rc")
@@ -251,7 +259,7 @@ def _draw_overview_page(
         if stdout:
             y = _draw_kv(c, margin_x, y, "Console excerpt", stdout.replace("\n", " "))
 
-        y -= 4 * mm
+        y -= 6 * mm
 
     c.showPage()
 
@@ -307,16 +315,16 @@ def _draw_cloud_summary_table(
     y = height - 30 * mm
 
     _draw_section_title(c, "2. 클라우드 취약점 분석·평가 요약", margin_x, y)
-    y -= 10 * mm
+    y -= 12 * mm
 
-    c.setFont(KOREAN_FONT_NAME, 9)
+    c.setFont(KOREAN_FONT_NAME, 12)
     headers = ["분류", "코드", "점검 항목", "도구", "결과 요약"]
     col_x = [
         margin_x,
         margin_x + 25 * mm,
-        margin_x + 45 * mm,
+        margin_x + 50 * mm,
         margin_x + 120 * mm,
-        margin_x + 140 * mm,
+        margin_x + 145 * mm,
     ]
 
     # 헤더
@@ -324,23 +332,25 @@ def _draw_cloud_summary_table(
         c.drawString(col_x[i], y, h)
     y -= 6 * mm
     c.line(margin_x, y, width - margin_x, y)
-    y -= 4 * mm
+    y -= 6 * mm
+
+    c.setFont(KOREAN_FONT_NAME, 11)
 
     for row in summary_rows:
         y = _ensure_page_space(c, y)
-        c.setFont(KOREAN_FONT_NAME, 8)
+        line_gap = 14
 
         c.drawString(col_x[0], y, str(row.get("category", ""))[:16])
         c.drawString(col_x[1], y, row.get("code", ""))
-        # 점검 항목 / 도구 / 결과는 줄바꿈 처리
+
         title_lines = _wrap_text(row.get("title", ""), 40)
         tool_lines = _wrap_text(row.get("tools", ""), 18)
-        result_lines = _wrap_text(row.get("result", ""), 40)
+        result_lines = _wrap_text(row.get("result", ""), 45)
         max_lines = max(len(title_lines), len(tool_lines), len(result_lines))
 
         for i in range(max_lines):
             if i > 0:
-                y -= 4 * mm
+                y -= line_gap
                 y = _ensure_page_space(c, y)
             if i < len(title_lines):
                 c.drawString(col_x[2], y, title_lines[i])
@@ -349,7 +359,7 @@ def _draw_cloud_summary_table(
             if i < len(result_lines):
                 c.drawString(col_x[4], y, result_lines[i])
 
-        y -= 6 * mm
+        y -= line_gap
 
     c.showPage()
 
@@ -375,7 +385,7 @@ def _draw_vuln_detail_section(
     y = height - 30 * mm
 
     _draw_section_title(c, f"3. 세부 취약점 항목 - {ca_code} {title}", margin_x, y)
-    y -= 8 * mm
+    y -= 14 * mm
 
     y = _draw_kv(c, margin_x, y, "취약점 개요", overview)
     y = _draw_kv(c, margin_x, y, "점검내용", check_content)
@@ -385,10 +395,10 @@ def _draw_vuln_detail_section(
     y = _draw_kv(c, margin_x, y, "판단기준(양호)", criteria_good)
     y = _draw_kv(c, margin_x, y, "판단기준(취약)", criteria_bad)
 
-    c.setFont(KOREAN_FONT_NAME, 10)
+    c.setFont(KOREAN_FONT_NAME, 13)
     c.drawString(margin_x, y, "점검 및 조치 사례")
-    y -= 6 * mm
-    c.setFont(KOREAN_FONT_NAME, 9)
+    y -= 10 * mm
+    c.setFont(KOREAN_FONT_NAME, 12)
 
     for idx, step in enumerate(steps, start=1):
         y = _ensure_page_space(c, y)
@@ -489,7 +499,7 @@ def _draw_vuln_detail_pages(
 
 
 # ──────────────────────────────────────────────
-# 5장. 도구별 실행 상세 (기존 섹션 확장)
+# 5장. 도구별 실행 상세
 # ──────────────────────────────────────────────
 def _draw_tool_sections(
     c: canvas.Canvas,
@@ -501,7 +511,7 @@ def _draw_tool_sections(
     y = height - 30 * mm
 
     _draw_section_title(c, "4. 도구별 실행 상세", margin_x, y)
-    y -= 12 * mm
+    y -= 14 * mm
 
     for code in codes:
         meta = metas.get(code)
@@ -514,7 +524,7 @@ def _draw_tool_sections(
 
         y = _ensure_page_space(c, y)
         _draw_section_title(c, f"[{tool_name}] {code}", margin_x, y)
-        y -= 8 * mm
+        y -= 10 * mm
 
         # ─ 기본 메타 정보 ─
         y = _draw_kv(c, margin_x, y, "Category", tool_category or "-")
@@ -524,7 +534,7 @@ def _draw_tool_sections(
 
         if not meta:
             y = _draw_kv(c, margin_x, y, "Status", "최근 실행 결과가 존재하지 않습니다.")
-            y -= 6 * mm
+            y -= 10 * mm
             continue
 
         y = _ensure_page_space(c, y)
@@ -549,15 +559,15 @@ def _draw_tool_sections(
 
         # ─ 파일 요약 (상위 N개) ─
         y = _ensure_page_space(c, y)
-        c.setFont(KOREAN_FONT_NAME, 10)
+        c.setFont(KOREAN_FONT_NAME, 13)
         c.drawString(margin_x, y, "Generated Artifacts (Top N)")
-        y -= 6 * mm
-        c.setFont(KOREAN_FONT_NAME, 8)
+        y -= 8 * mm
+        c.setFont(KOREAN_FONT_NAME, 11)
 
         top_files = _summarize_files(files, max_files=8)
         if not top_files:
-            c.drawString(margin_x + 5 * mm, y, "- No files recorded in latest run.")
-            y -= 10 * mm
+            c.drawString(margin_x + 8 * mm, y, "- No files recorded in latest run.")
+            y -= 16 * mm
         else:
             for f in top_files:
                 y = _ensure_page_space(c, y)
@@ -573,20 +583,19 @@ def _draw_tool_sections(
                     )
                 )
 
-                # path 줄바꿈
-                lines = _wrap_text(path, 90)
-                c.drawString(margin_x + 5 * mm, y, f"- {lines[0]}")
-                y -= 4 * mm
+                lines = _wrap_text(path, 70)
+                c.drawString(margin_x + 8 * mm, y, f"- {lines[0]}")
+                y -= 14
                 for extra in lines[1:]:
-                    c.drawString(margin_x + 9 * mm, y, extra)
-                    y -= 4 * mm
+                    c.drawString(margin_x + 14 * mm, y, extra)
+                    y -= 14
 
                 c.drawString(
-                    margin_x + 9 * mm,
+                    margin_x + 14 * mm,
                     y,
                     f"(size={size_kb}, mtime={mtime_str})",
                 )
-                y -= 8 * mm
+                y -= 18
 
         # 섹션 간 여백
         y -= 10 * mm
@@ -637,7 +646,7 @@ def _draw_screenshot_page(
 
     y = height - 30 * mm
     _draw_section_title(c, f"5. 증적 화면 - {title}", margin_x, y)
-    y -= 12 * mm
+    y -= 16 * mm
 
     for rel in img_rel_paths:
         img_path = os.path.abspath(os.path.join(base, rel))
@@ -654,15 +663,15 @@ def _draw_screenshot_page(
 
         img_w, img_h = img.getSize()
         max_w = width - 2 * margin_x
-        max_h = 60 * mm
+        max_h = 70 * mm
         scale = min(max_w / img_w, max_h / img_h)
         draw_w, draw_h = img_w * scale, img_h * scale
 
         c.drawImage(img, margin_x, y - draw_h, width=draw_w, height=draw_h)
         y -= draw_h + 4 * mm
-        c.setFont(KOREAN_FONT_NAME, 8)
+        c.setFont(KOREAN_FONT_NAME, 11)
         c.drawString(margin_x, y, f"파일: {rel}")
-        y -= 10 * mm
+        y -= 16 * mm
 
     c.showPage()
 
@@ -732,7 +741,7 @@ def generate_evidence_pdf(
     # 4. 세부 취약점 항목 (KISA 스타일 템플릿 2개 예시)
     _draw_vuln_detail_pages(c, codes)
 
-    # 5. 도구별 실행 상세 (기존 섹션 확장)
+    # 5. 도구별 실행 상세
     _draw_tool_sections(c, codes, metas)
 
     # 6. 증적 화면(스크린샷)
