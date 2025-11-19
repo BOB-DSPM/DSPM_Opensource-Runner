@@ -61,13 +61,13 @@ docker build -t oss-runner:latest .
 
 # 컨테이너 실행
 docker run --rm -it \
-  -p 8000:8000 \
+  -p 8800:8000 \
   -v "$(pwd)/logs:/app/logs" \
   --name oss-runner \
   oss-runner:latest
 ```
 
-API 문서: http://localhost:8000/docs
+API 문서: http://localhost:8800/docs
 
 ### 로컬 개발 (Docker 없이)
 
@@ -91,7 +91,7 @@ bash run.sh
 ### 1. 실행 가능한 도구 목록 조회
 
 ```bash
-curl http://localhost:8000/opensource-list
+curl http://localhost:8800/opensource-list
 ```
 
 **응답:**
@@ -115,7 +115,7 @@ curl http://localhost:8000/opensource-list
 ### 2. 도구 실행
 
 ```bash
-curl -X POST http://localhost:8000/set/hello
+curl -X POST http://localhost:8800/set/hello
 ```
 
 **응답:**
@@ -133,20 +133,20 @@ curl -X POST http://localhost:8000/set/hello
 ### 3. 실행 목록 조회
 
 ```bash
-curl http://localhost:8000/runs
+curl http://localhost:8800/runs
 ```
 
 ### 4. 실행 상세 조회
 
 ```bash
-curl http://localhost:8000/runs/f6a54aa7-e8bb-4c18-b5a4-2c98773740c0
+curl http://localhost:8800/runs/f6a54aa7-e8bb-4c18-b5a4-2c98773740c0
 ```
 
 ### 5. 실시간 로그 스트리밍 (SSE)
 
 **터미널:**
 ```bash
-curl -N http://localhost:8000/runs/f6a54aa7-e8bb-4c18-b5a4-2c98773740c0/logs
+curl -N http://localhost:8800/runs/f6a54aa7-e8bb-4c18-b5a4-2c98773740c0/logs
 ```
 
 **JavaScript (프론트엔드):**
@@ -168,7 +168,7 @@ eventSource.onerror = (error) => {
 ### 6. 실행 중단
 
 ```bash
-curl -X POST http://localhost:8000/runs/f6a54aa7-e8bb-4c18-b5a4-2c98773740c0/stop
+curl -X POST http://localhost:8800/runs/f6a54aa7-e8bb-4c18-b5a4-2c98773740c0/stop
 ```
 
 ## 커스터마이징
@@ -227,10 +227,10 @@ eventSource.onerror = (error) => {
 
 ```bash
 # 다른 포트로 실행
-docker run -p 8001:8000 oss-runner:latest
+docker run -p 8801:8000 oss-runner:latest
 
 # 또는 .env 수정
-PORT=8001
+PORT=8801
 ```
 
 ### 로그 파일 권한 오류
