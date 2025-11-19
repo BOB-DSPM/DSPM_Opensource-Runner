@@ -1,6 +1,6 @@
 # ============================================
 # file: app/services/evidence_report_service.py
-# (SAGE 보고서 전용 - 통계/목록 + Prowler 표 상위20)
+# (SAGE 보고서 전용 - 통계/목록 포함 버전)
 # ============================================
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from .oss_service import find_latest_result_for_code
 from ..utils.loader import get_item_by_code
 from reportlab.lib.utils import ImageReader
 
+WATERMARK_PATH = BASE_DIR.parent / "assets" / "MADEIT.png"
 
 # ──────────────────────────────────────────────
 # 설정
@@ -34,31 +35,11 @@ BASE_DIR = Path(__file__).resolve().parent
 FONT_PATH = BASE_DIR.parent / "fonts" / "GowunDodum-Regular.ttf"
 KOREAN_FONT_NAME = "GowunDodum"
 
-WATERMARK_PATH = BASE_DIR.parent / "assets" / "MADEIT.png"
-try:
-    WATERMARK_IMAGE = ImageReader(str(WATERMARK_PATH))
-except Exception as e:
-    print(f"[WARN] Failed to load watermark image: {e}")
-    WATERMARK_IMAGE = None
-
 try:
     pdfmetrics.registerFont(TTFont(KOREAN_FONT_NAME, str(FONT_PATH)))
 except Exception as e:
     # 실패해도 기본 폰트로라도 생성되도록만 함
     print(f"[WARN] Failed to register Korean font '{KOREAN_FONT_NAME}': {e}")
-
-KOREAN_FONT_NAME = "GowunDodum"
-
-# Bold 폰트 있으면 사용, 없으면 기본 폰트 재사용
-BOLD_FONT_NAME = KOREAN_FONT_NAME
-try:
-    FONT_PATH_BOLD = BASE_DIR.parent / "fonts" / "GowunDodum-Bold.ttf"
-    if FONT_PATH_BOLD.exists():
-        pdfmetrics.registerFont(TTFont("GowunDodum-Bold", str(FONT_PATH_BOLD)))
-        BOLD_FONT_NAME = "GowunDodum-Bold"
-except Exception as e:
-    print(f"[WARN] Failed to register bold font: {e}")
-
 
 # 레이아웃 상수 (줄 간격 넉넉하게)
 TOP_MARGIN_MM = 30
@@ -70,8 +51,8 @@ BODY_FONT = 11
 SMALL_FONT = 9
 
 # 제목 간 간격 보정
-HEADING_LEVEL1_EXTRA = 10   # 섹션 제목 뒤 여유
-HEADING_LEVEL2_EXTRA = 8  # 소제목 뒤 여유
+HEADING_LEVEL1_EXTRA = 8   # 섹션 제목 뒤 여유
+HEADING_LEVEL2_EXTRA = 6   # 소제목 뒤 여유
 
 
 # ──────────────────────────────────────────────
@@ -85,110 +66,33 @@ def _safe_evidence_dir(base_dir: str = EVIDENCE_ROOT) -> str:
     return path
 
 
-def _wrap_text(
-    text: str,
-    max_width: float,
-    font_name: str = KOREAN_FONT_NAME,
-    font_size: int = BODY_FONT,
-) -> List[str]:
+def _wrap_text(text: str, max_chars: int) -> List[str]:
     """
-    문자열을 주어진 픽셀 폭(max_width) 안에서 자동 줄바꿈한다.
-    - ReportLab의 stringWidth로 실제 폭을 계산해서 오른쪽 박스를 넘지 않게 함.
+    아주 단순한 단어 기준 줄바꿈 유틸.
+    - ReportLab에서 긴 문자열을 섹션별로 줄바꿈하기 위함.
     """
     lines: List[str] = []
-
     for raw_line in (text or "").split("\n"):
         line = raw_line.rstrip()
         if not line:
             lines.append("")
             continue
-
-        words = line.split(" ")
         current = ""
-
-        for word in words:
-            # 현재 줄에 word를 붙였을 때 폭 계산
-            candidate = word if not current else current + " " + word
-            width = pdfmetrics.stringWidth(candidate, font_name, font_size)
-
-            if width <= max_width:
-                # 아직 폭 안에 들어오면 현재 줄에 계속 붙임
-                current = candidate
-            else:
-                # 이미 꽉 찼으면 이전 줄을 확정하고 새 줄 시작
-                if current:
-                    lines.append(current)
+        for word in line.split(" "):
+            if not current:
                 current = word
-
-                # 단일 word 자체가 너무 길어서 max_width를 초과하는 경우(긴 URL 등)
-                # 글자 단위로 강제 분할
-                while pdfmetrics.stringWidth(current, font_name, font_size) > max_width:
-                    tmp = ""
-                    for ch in current:
-                        cand2 = tmp + ch
-                        if pdfmetrics.stringWidth(cand2, font_name, font_size) <= max_width:
-                            tmp = cand2
-                        else:
-                            break
-                    if not tmp:   # 안전장치
-                        break
-                    lines.append(tmp)
-                    current = current[len(tmp):].lstrip()
-
+            elif len(current) + 1 + len(word) <= max_chars:
+                current += " " + word
+            else:
+                lines.append(current)
+                current = word
         if current:
             lines.append(current)
-
     return lines
-
-def _draw_watermark(c: canvas.Canvas) -> None:
-    """
-    현재 페이지 가운데에 MADEIT 로고 워터마크를 옅게 깐다.
-    """
-    if WATERMARK_IMAGE is None:
-        return
-
-    page_w, page_h = A4
-    iw, ih = WATERMARK_IMAGE.getSize()
-
-    # 페이지의 70% 폭, 40% 높이 안에 들어가도록 스케일
-    max_w = page_w * 0.7
-    max_h = page_h * 0.4
-    scale = min(max_w / iw, max_h / ih)
-
-    w = iw * scale
-    h = ih * scale
-    x = (page_w - w) / 2.0
-    y = (page_h - h) / 2.0
-
-    c.saveState()
-    try:
-        # 지원되면 투명도 낮게 설정
-        if hasattr(c, "setFillAlpha"):
-            c.setFillAlpha(0.08)  # 필요하면 0.05~0.15 사이로 조절
-
-        c.drawImage(
-            WATERMARK_IMAGE,
-            x,
-            y,
-            width=w,
-            height=h,
-            preserveAspectRatio=True,
-            mask="auto",
-        )
-    finally:
-        c.restoreState()
 
 
 def _new_page_y() -> float:
     return A4[1] - TOP_MARGIN_MM * mm
-
-def _start_new_page(c: canvas.Canvas) -> float:
-    """
-    새 페이지로 넘어가고 워터마크를 다시 깐 다음, y 시작 위치를 반환.
-    """
-    c.showPage()
-    _draw_watermark(c)
-    return _new_page_y()
 
 
 def _ensure_page_space(
@@ -203,48 +107,35 @@ def _ensure_page_space(
     bottom = BOTTOM_MARGIN_MM * mm
     leading = font_size + 6  # 줄 간격 넉넉하게
     if y - lines * leading < bottom:
-        return _start_new_page(c)
-
+        c.showPage()
+        return _new_page_y()
     return y
+
 
 def _draw_paragraph(
     c: canvas.Canvas,
     text: str,
     x: float,
     y: float,
-    max_chars: int = 80,          # ← 기존 파라미터는 남겨두지만 실제로는 안 씀
+    max_chars: int = 80,
     font_size: int = BODY_FONT,
 ) -> float:
     """
     여러 줄 문단 출력.
     반환값: 마지막 줄 다음 y 좌표
-    - 페이지 폭과 오른쪽 여백을 고려해 자동 줄바꿈한다.
     """
-    # A4 기준, 왼쪽 margin_x와 대칭이 되도록 오른쪽 여백도 25mm로 가정
-    page_width = A4[0]
-    right_margin = 25 * mm
-    max_width = page_width - x - right_margin   # 남은 출력 폭
-
-    lines = _wrap_text(text, max_width, font_name=KOREAN_FONT_NAME, font_size=font_size)
+    lines = _wrap_text(text, max_chars)
     if not lines:
         return y
 
     y = _ensure_page_space(c, y, len(lines), font_size=font_size)
     c.setFont(KOREAN_FONT_NAME, font_size)
-
-    # 본문은 조금 더 넉넉하게 줄 간격
-    if font_size >= BODY_FONT:
-        leading = font_size + 6
-    else:
-        leading = font_size + 4
+    leading = font_size + 6
 
     for line in lines:
         c.drawString(x, y, line)
         y -= leading
-
     return y
-
-
 
 
 def _draw_heading(
@@ -413,16 +304,12 @@ def _join_file_path(meta: Dict[str, Any], path: str) -> str:
 
 def _analyze_prowler_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Prowler 결과(메인 CSV)를 읽어 통계를 만든다.
-
-    - total_fail, severity_counts: STATUS == FAIL 기준
-    - findings: STATUS와 상관없이 모든 행을 담음 (표 출력용)
-
+    Prowler 결과(메인 CSV)를 읽어 FAIL 기준 위험도 통계를 만든다.
     반환:
     {
       "total_rows": int,
       "total_fail": int,
-      "severity_counts": {"CRITICAL": n, "HIGH": m, ...},  # FAIL 기준
+      "severity_counts": {"CRITICAL": n, "HIGH": m, ...},
       "findings": [
           {
             "check_id": ...,
@@ -451,15 +338,17 @@ def _analyze_prowler_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]
     if not files:
         return result
 
-    # 메인 CSV 후보: outputs/ 아래의 .csv (compliance/ 포함 가능)
+    # 메인 CSV 찾기: outputs/ 바로 아래의 prowler-output-*.csv (compliance/ 제외)
     csv_candidates = [
-        f for f in files if str(f.get("path", "")).lower().endswith(".csv")
+        f
+        for f in files
+        if str(f.get("path", "")).lower().endswith(".csv")
     ]
 
     main_csv_entry = None
-    # compliance/ 아닌 것 우선
     for f in csv_candidates:
         p = str(f.get("path", ""))
+        # compliance/ 아래가 아닌 파일 우선
         if "/compliance/" not in p and "compliance" not in p:
             main_csv_entry = f
             break
@@ -481,6 +370,7 @@ def _analyze_prowler_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]
             if not header:
                 return result
 
+            # 유연하게 컬럼 인덱스 찾기
             def idx(col_names: List[str]) -> Optional[int]:
                 for name in col_names:
                     if name in header:
@@ -498,38 +388,37 @@ def _analyze_prowler_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]
                 ["RISK", "RISK_DESCRIPTION", "FAIL_REASON", "NOTES", "REMEDIATION"]
             )
 
-            def safe_get(row: List[str], i: Optional[int]) -> str:
-                if i is None or i >= len(row):
-                    return ""
-                return (row[i] or "").strip()
-
             for row in reader:
                 result["total_rows"] += 1
-                status = safe_get(row, idx_status).upper() if idx_status is not None else ""
-                severity = (
-                    safe_get(row, idx_sev).upper() if idx_sev is not None else ""
-                ) or "UNKNOWN"
+                if idx_status is None or idx_sev is None:
+                    continue
+                if len(row) <= max(idx_status, idx_sev):
+                    continue
 
-                # FAIL 통계 집계
-                if status == "FAIL":
-                    result["total_fail"] += 1
-                    result["severity_counts"][severity] = (
-                        result["severity_counts"].get(severity, 0) + 1
-                    )
+                status = (row[idx_status] or "").strip().upper()
+                if status != "FAIL":
+                    continue
 
-                # findings에는 STATUS 상관없이 다 넣음
+                severity = (row[idx_sev] or "").strip().upper() or "UNKNOWN"
+                result["total_fail"] += 1
+                result["severity_counts"][severity] = result["severity_counts"].get(severity, 0) + 1
+
+                def safe_get(i: Optional[int]) -> str:
+                    if i is None or i >= len(row):
+                        return ""
+                    return (row[i] or "").strip()
+
                 finding = {
-                    "check_id": safe_get(row, idx_check_id),
-                    "title": safe_get(row, idx_check_title),
+                    "check_id": safe_get(idx_check_id),
+                    "title": safe_get(idx_check_title),
                     "severity": severity,
-                    "status": status or "UNKNOWN",
-                    "service": safe_get(row, idx_service),
-                    "region": safe_get(row, idx_region),
-                    "resource": safe_get(row, idx_resource),
-                    "reason": safe_get(row, idx_reason),
+                    "status": status,
+                    "service": safe_get(idx_service),
+                    "region": safe_get(idx_region),
+                    "resource": safe_get(idx_resource),
+                    "reason": safe_get(idx_reason),
                 }
                 result["findings"].append(finding)
-
     except Exception as e:
         print(f"[WARN] Failed to analyze Prowler CSV: {e}")
 
@@ -601,6 +490,7 @@ def _analyze_steampipe_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, An
                 if alarm == ok == info == skip == 0:
                     stats["unknown"] += 1
 
+            # 재귀적으로 하위 그룹도 탐색
             sub = g.get("groups") or []
             if sub:
                 walk_groups(sub)
@@ -621,13 +511,10 @@ def _analyze_custodian_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, An
     반환:
     {
       "policies": [
-         {
-           "policy": "iam-users-without-mfa-audit",
-           "count": 3,
-           "path": ".../outputs/iam-users-without-mfa-audit/resources.json",
-           "examples": ["user1", "user2", ...]  # 대표 리소스 예시 (최대 3개)
-         },
-         ...
+         {"policy": "iam-users-without-mfa-audit",
+          "count": 3,
+          "path": ".../outputs/iam-users-without-mfa-audit/resources.json"},
+          ...
        ],
       "total_findings": int
     }
@@ -640,57 +527,15 @@ def _analyze_custodian_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, An
     if not files:
         return result
 
-    resources_entries = [
-        f for f in files if str(f.get("path", "")).endswith("resources.json")
-    ]
-
-    # 대표 리소스 추출용 후보 키
-    CANDIDATE_KEYS = [
-        "id",
-        "name",
-        "Name",
-        "UserName",
-        "InstanceId",
-        "DBInstanceIdentifier",
-        "BucketName",
-        "GroupId",
-        "SecurityGroupId",
-        "LoadBalancerArn",
-        "LoadBalancerName",
-        "Arn",
-        "ResourceId",
-        "KeyId",
-    ]
-
-    def _extract_example_id(res: Any) -> str:
-        """리소스 객체에서 대표 식별자를 최대한 공통적으로 뽑아낸다."""
-        if isinstance(res, dict):
-            # 1) 대표 키 우선
-            for k in CANDIDATE_KEYS:
-                if k in res and isinstance(res[k], str) and res[k]:
-                    return res[k]
-
-            # 2) 태그/Tags 에서 Name 찾기
-            tags = res.get("Tags") or res.get("tags")
-            if isinstance(tags, list):
-                for t in tags:
-                    if not isinstance(t, dict):
-                        continue
-                    key = t.get("Key") or t.get("key")
-                    if key in ("Name", "name"):
-                        val = t.get("Value") or t.get("value")
-                        if isinstance(val, str) and val:
-                            return val
-
-        # 3) 마지막 fallback: 문자열화해서 앞부분만 사용
-        s = str(res)
-        return s[:80]
+    # path 기준으로 디렉터리별 그룹핑 (각 정책 디렉터리)
+    resources_entries = [f for f in files if f.get("path", "").endswith("resources.json")]
 
     for f in resources_entries:
         path = str(f.get("path", ""))
         full_path = _join_file_path(meta, path)
-        policy_dir = os.path.dirname(path).split("/")[-1]
+        policy_dir = os.path.dirname(path).split("/")[-1]  # 예: iam-users-without-mfa-audit
 
+        # metadata.json도 같이 찾기
         meta_path = path.replace("resources.json", "metadata.json")
         meta_full = _join_file_path(meta, meta_path)
         policy_name = policy_dir
@@ -707,19 +552,12 @@ def _analyze_custodian_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, An
                 pass
 
         count = 0
-        examples: List[str] = []
-
         try:
             if os.path.exists(full_path):
                 with open(full_path, "r", encoding="utf-8") as rf:
                     data = json.load(rf)
                 if isinstance(data, list):
                     count = len(data)
-                    # 예시 리소스 최대 3개까지 추출
-                    for res in data:
-                        if len(examples) >= 3:
-                            break
-                        examples.append(_extract_example_id(res))
         except Exception as e:
             print(f"[WARN] Failed to load Custodian resources: {full_path} - {e}")
             continue
@@ -732,14 +570,13 @@ def _analyze_custodian_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, An
                 "policy": policy_name,
                 "count": count,
                 "path": full_path,
-                "examples": examples,
             }
         )
         result["total_findings"] += count
 
+    # 정책 이름 기준으로 정렬
     result["policies"].sort(key=lambda x: x["policy"])
     return result
-
 
 
 def _merge_severity_counts(*dicts: Dict[str, int]) -> Dict[str, int]:
@@ -751,180 +588,6 @@ def _merge_severity_counts(*dicts: Dict[str, int]) -> Dict[str, int]:
 
 
 # ──────────────────────────────────────────────
-# Prowler 상위 20건 표 렌더링
-# ──────────────────────────────────────────────
-def _draw_prowler_table(
-    c: canvas.Canvas,
-    findings: List[Dict[str, Any]],
-    margin_x: float,
-    y: float,
-) -> float:
-    """
-    Prowler findings 상위 20건을 '세로 표' 형태로 출력.
-    - 각 취약점마다 작은 카드/표처럼:
-      ┌──────────────────────────────┐
-      │ No.1 [STATUS/SEV]           │
-      │ 체크 ID: ...                │
-      │ 서비스: ..., 리전: ...      │
-      │ 리소스: ...                 │
-      │ 사유/위험 설명: ...        │
-      └──────────────────────────────┘
-    """
-
-    if not findings:
-        return _draw_paragraph(
-            c,
-            "현재 Prowler 메인 CSV에서 진단 결과를 식별하지 못했습니다.",
-            margin_x,
-            y,
-            70,
-            BODY_FONT,
-        )
-
-    width, _ = A4
-    box_left = margin_x
-    box_right = width - margin_x
-    box_width = box_right - box_left
-
-    # 제목 설명 한 줄 정도 먼저
-    y = _draw_paragraph(
-        c,
-        "※ 아래 표는 Prowler 진단 결과 중 우선 확인이 필요한 상위 20개 항목을 세로 표 형태로 정리한 것입니다.",
-        margin_x,
-        y,
-        max_chars=80,   # 페이지 폭 기준으로도 조금 줄이기
-        font_size=BODY_FONT,
-    )
-    # 설명과 No.1 사이 여백을 넉넉히
-    y -= BODY_FONT + 15
-
-    # 박스 내부에서 사용할 최대 글자 수(폭)
-    # - 몸통 텍스트는 55자 정도, reason(작은 글씨)는 70자
-    INNER_MAX = 55
-    INNER_REASON_MAX = 70
-
-    # 각 finding을 카드 형태로 반복
-    for idx_f, fitem in enumerate(findings[:10], start=1):
-        # 한 카드에 대략 13~15줄 정도 필요하다고 보고 여유 체크
-        y = _ensure_page_space(c, y, 20, font_size=BODY_FONT)
-
-        status = (fitem.get("status") or "UNKNOWN").upper()
-        sev = (fitem.get("severity") or "UNKNOWN").upper()
-        check_id = fitem.get("check_id") or "-"
-        title = fitem.get("title") or "-"
-        service = fitem.get("service") or "-"
-        region = fitem.get("region") or "-"
-        resource = fitem.get("resource") or "-"
-        reason = fitem.get("reason") or "-"
-
-        # 카드(박스) 상단 y좌표 저장
-        box_top_y = y
-
-        # 박스 안 패딩
-        inner_x = box_left + 4 * mm
-        label_x = inner_x
-        value_x = inner_x + 32 * mm  # 라벨 열 폭
-
-        # 1) 첫 줄: No + 상태/심각도
-        c.drawString(inner_x, y, "")
-        y-=5
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
-        header_text = f"No.{idx_f}  [{status}/{sev}]"
-        c.drawString(inner_x, y, header_text)
-        y -= BODY_FONT + 10
-
-        # 2) 체크 ID
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
-        c.drawString(label_x, y, "체크 ID:")
-        y = _draw_paragraph(
-            c,
-            check_id,
-            value_x,
-            y,
-            max_chars=INNER_MAX,
-            font_size=BODY_FONT,
-        )
-        y -= 4
-
-        # 3) 점검 항목(타이틀)
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
-        c.drawString(label_x, y, "점검 항목:")
-        y = _draw_paragraph(
-            c,
-            title,
-            value_x,
-            y,
-            max_chars=INNER_MAX,
-            font_size=BODY_FONT,
-        )
-        y -= 4
-
-        # 4) 서비스 / 리전
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
-        c.drawString(label_x, y, "서비스/리전:")
-        combo = f"{service} / {region}"
-        y = _draw_paragraph(
-            c,
-            combo,
-            value_x,
-            y,
-            max_chars=INNER_MAX,
-            font_size=BODY_FONT,
-        )
-        y -= 4
-
-        # 5) 리소스
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
-        c.drawString(label_x, y, "리소스:")
-        y = _draw_paragraph(
-            c,
-            resource,
-            value_x,
-            y,
-            max_chars=INNER_MAX,
-            font_size=BODY_FONT,
-        )
-        y -= 4
-
-        # 6) 사유/위험 설명
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
-        c.drawString(label_x, y, "사유/위험 설명:")
-        y = _draw_paragraph(
-            c,
-            reason,
-            value_x,
-            y,
-            max_chars=INNER_REASON_MAX,
-            font_size=SMALL_FONT,
-        )
-        y -= 4
-
-        # 카드 하단 y 저장 (박스 테두리용)
-        box_bottom_y = y + 4  # 마지막 줄 밑에 약간 여유
-
-        # 박스 테두리 그리기
-        c.setLineWidth(0.5)
-        c.rect(
-            box_left,
-            box_bottom_y,
-            box_width,
-            box_top_y - box_bottom_y + 8,  # 위/아래 여유
-        )
-
-        # 카드 사이 간격
-        y = box_bottom_y - 10
-
-        # 다음 카드가 페이지 아래에 걸리면 다음 페이지로
-        if y < BOTTOM_MARGIN_MM * mm + 60:
-            y = _start_new_page(c)
-
-    return y
-
-
-
-
-
-# ──────────────────────────────────────────────
 # 메인 함수
 # ──────────────────────────────────────────────
 def generate_evidence_pdf(
@@ -933,13 +596,12 @@ def generate_evidence_pdf(
     """
     SAGE 보고서 구조에 맞춰 PDF 증적 보고서를 생성한다.
 
-    섹션 구성:
-      1. 종합 요약
-      2. 컴플라이언스 관점 요약
-      3. 세부 취약점 항목(템플릿 설명)
-      4. Prowler 진단 결과 (상위 20건)  ← ★ 여기로 끌어올림 + 표
-      5. 도구별 실행 상세
-      6. 부록 – 도구별 산출물 개요
+    반환:
+    {
+      "pdf_path": 절대경로,
+      "run_dir_rel": "runs/evidence_pdf/20251113_153012",
+      "file_rel": "evidence_report.pdf"
+    }
     """
     if not codes:
         codes = list(DEFAULT_TOOL_CODES)
@@ -969,6 +631,7 @@ def generate_evidence_pdf(
     steampipe_stats = _analyze_steampipe_from_meta(tool_meta.get("steampipe"))
     custodian_stats = _analyze_custodian_from_meta(tool_meta.get("custodian"))
 
+    # Prowler 기반 severity 합계 + (옵션) 다른 도구와 합산
     total_severity = _merge_severity_counts(prowler_stats.get("severity_counts", {}))
 
     # 2) PDF 준비
@@ -979,7 +642,6 @@ def generate_evidence_pdf(
     c = canvas.Canvas(pdf_path, pagesize=A4)
     width, height = A4
     margin_x = 25 * mm
-    _draw_watermark(c)
     y = _new_page_y()
 
     # ─────────────────────────────────────
@@ -1016,7 +678,8 @@ def generate_evidence_pdf(
         "※ 본 문서는 SAGE Dashboard에서 실행된 오픈소스 보안/컴플라이언스 도구의 최신 결과를 기반으로 생성되었습니다.",
     )
 
-    y = _start_new_page(c)
+    c.showPage()
+    y = _new_page_y()
 
     # ─────────────────────────────────────
     # 1. 종합 요약 (Executive Summary)
@@ -1034,7 +697,7 @@ def generate_evidence_pdf(
     y = _draw_paragraph(c, text, margin_x, y, max_chars=80, font_size=BODY_FONT)
     y -= 4
 
-    # 1-1-b 위험도 통계 요약 (Prowler FAIL 기준)
+    # 1-1-b 위험도 통계 요약 (Prowler 기준)
     if prowler_stats.get("total_fail", 0) > 0:
         sev_summary_parts = []
         for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "UNKNOWN"]:
@@ -1051,7 +714,7 @@ def generate_evidence_pdf(
         y -= 8
 
     # 1-2 규제·컴플라이언스 프레임워크 관점 요약
-    y = _draw_heading(c, "1-2. 규제·컴플라이언스 프레임워크 관점 요약", margin_x, y, level=2)
+    y = _draw_heading(c, "1-2. 규제·컴플라이언스 관점 요약", margin_x, y, level=2)
     if frameworks_str != "-":
         text = (
             "도구 산출물 분석 결과, 다음 컴플라이언스 프레임워크 관점의 점검 결과가 생성되었다: "
@@ -1077,7 +740,8 @@ def generate_evidence_pdf(
         y = _draw_paragraph(c, f"- {line}", margin_x, y, max_chars=80, font_size=BODY_FONT)
     y -= 4
 
-    y = _start_new_page(c)
+    c.showPage()
+    y = _new_page_y()
 
     # ─────────────────────────────────────
     # 2. 컴플라이언스 관점 요약
@@ -1094,7 +758,8 @@ def generate_evidence_pdf(
         y = _draw_paragraph(c, summary, margin_x, y, max_chars=90, font_size=BODY_FONT)
         y -= 6
 
-    y = _start_new_page(c)
+    c.showPage()
+    y = _new_page_y()
 
     # ─────────────────────────────────────
     # 3. 세부 취약점 항목 (개념 설명)
@@ -1105,46 +770,28 @@ def generate_evidence_pdf(
         title = f"3. 세부 취약점 항목 - {item['code']} {item['title']}"
         y = _draw_heading(c, title, margin_x, y, level=2)
 
-        y = _draw_paragraph(c, f"취약점 개요: {item['overview']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-        y = _draw_paragraph(c, f"점검 내용: {item['check']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-        y = _draw_paragraph(c, f"점검 목적: {item['purpose']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-        y = _draw_paragraph(c, f"보안 위협: {item['risk']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-        y = _draw_paragraph(c, f"점검 대상 도구: {item['tools']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-        y = _draw_paragraph(c, f"판단 기준(양호): {item['good']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-        y = _draw_paragraph(c, f"판단 기준(취약): {item['bad']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
+        y = _draw_paragraph(c, f"취약점 개요: {item['overview']}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"점검 내용: {item['check']}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"점검 목적: {item['purpose']}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"보안 위협: {item['risk']}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"점검 대상 도구: {item['tools']}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"판단 기준(양호): {item['good']}", margin_x, y, 90, BODY_FONT)
+        y = _draw_paragraph(c, f"판단 기준(취약): {item['bad']}", margin_x, y, 90, BODY_FONT)
 
-        y = _draw_paragraph(c, "점검 및 조치 사례:", margin_x, y, 80, BODY_FONT)
+        y = _draw_paragraph(c, "점검 및 조치 사례:", margin_x, y, 90, BODY_FONT)
         for idx_step, step in enumerate(item["steps"], start=1):
-            y = _draw_paragraph(c, f"Step {idx_step}: {step}", margin_x + 6 * mm, y, 78, BODY_FONT)
+            y = _draw_paragraph(c, f"Step {idx_step}: {step}", margin_x + 6 * mm, y, 88, BODY_FONT)
 
-        y -= 10
+        y -= 8
         y = _ensure_page_space(c, y, 3, font_size=BODY_FONT)
 
-
-
-
-
-    # ─────────────────────────────────────
-    # 4. Prowler 진단 결과 (상위 20건) ← ★ 표
-    # ─────────────────────────────────────
-    y -= 10
-    y = _draw_heading(c, "4. Prowler 진단 결과 (상위 10건)", margin_x, y, level=1)
-    findings = prowler_stats.get("findings") or []
-    y = _draw_prowler_table(c, findings, margin_x, y)
-
-    y = _start_new_page(c)
+    c.showPage()
+    y = _new_page_y()
 
     # ─────────────────────────────────────
-    # 5. 도구별 실행 상세
+    # 4. 도구별 실행 상세 + 간단 통계
     # ─────────────────────────────────────
-    y = _draw_heading(c, "5. 도구별 실행 상세", margin_x, y, level=1)
+    y = _draw_heading(c, "4. 도구별 실행 상세", margin_x, y, level=1)
 
     for code in codes:
         meta = tool_meta.get(code) or {}
@@ -1181,10 +828,10 @@ def generate_evidence_pdf(
             y = _draw_paragraph(c, f"Note: {note}", margin_x, y, 90, BODY_FONT)
 
         # 도구별 통계 요약
-        if code == "prowler" and prowler_stats.get("total_rows", 0) > 0:
+        if code == "prowler" and prowler_stats.get("total_fail", 0) > 0:
             y = _draw_paragraph(
                 c,
-                "Prowler 통계 (요약):",
+                "Prowler 통계 (FAIL 기준):",
                 margin_x,
                 y,
                 max_chars=90,
@@ -1192,30 +839,21 @@ def generate_evidence_pdf(
             )
             y = _draw_paragraph(
                 c,
-                f"- 총 진단 행 수: {prowler_stats['total_rows']}행",
+                f"- 총 FAIL: {prowler_stats['total_fail']}건",
                 margin_x + 6 * mm,
                 y,
                 90,
                 BODY_FONT,
             )
-            y = _draw_paragraph(
-                c,
-                f"- FAIL 건수: {prowler_stats['total_fail']}건",
-                margin_x + 6 * mm,
-                y,
-                90,
-                BODY_FONT,
-            )
-            if prowler_stats["total_fail"] > 0:
-                for sev, cnt in prowler_stats["severity_counts"].items():
-                    y = _draw_paragraph(
-                        c,
-                        f"- {sev}: {cnt}건 (FAIL)",
-                        margin_x + 6 * mm,
-                        y,
-                        90,
-                        BODY_FONT,
-                    )
+            for sev, cnt in prowler_stats["severity_counts"].items():
+                y = _draw_paragraph(
+                    c,
+                    f"- {sev}: {cnt}건",
+                    margin_x + 6 * mm,
+                    y,
+                    90,
+                    BODY_FONT,
+                )
 
         if code == "steampipe" and steampipe_stats.get("total_controls", 0) > 0:
             y = _draw_paragraph(
@@ -1236,53 +874,39 @@ def generate_evidence_pdf(
             )
             y = _draw_paragraph(
                 c,
-                f"- alarm: {steampipe_stats['alarm']} / ok: {steampipe_stats['ok']} / info: {steampipe_stats['info']} / skip: {steampipe_stats['skip']} / unknown: {steampipe_stats['unknown']}",
+                f"- alarm: {steampipe_stats['alarm']} / ok: {steampipe_stats['ok']} / info: {steampipe_stats['info']} / skip: {steampipe_stats['skip']}",
                 margin_x + 6 * mm,
                 y,
                 90,
                 BODY_FONT,
             )
 
-            if code == "custodian" and custodian_stats.get("total_findings", 0) > 0:
+        if code == "custodian" and custodian_stats.get("total_findings", 0) > 0:
+            y = _draw_paragraph(
+                c,
+                "Cloud Custodian 통계 (policy별 발견 리소스 수):",
+                margin_x,
+                y,
+                90,
+                BODY_FONT,
+            )
+            y = _draw_paragraph(
+                c,
+                f"- 총 발견 리소스: {custodian_stats['total_findings']}개",
+                margin_x + 6 * mm,
+                y,
+                90,
+                BODY_FONT,
+            )
+            for p in custodian_stats["policies"]:
                 y = _draw_paragraph(
                     c,
-                    "Cloud Custodian 통계 (policy별 발견 리소스 수):",
-                    margin_x,
-                    y,
-                    90,
-                    BODY_FONT,
-                )
-                y = _draw_paragraph(
-                    c,
-                    f"- 총 발견 리소스: {custodian_stats['total_findings']}개",
+                    f"- {p['policy']}: {p['count']}개",
                     margin_x + 6 * mm,
                     y,
                     90,
                     BODY_FONT,
                 )
-                for p in custodian_stats["policies"]:
-                    y = _draw_paragraph(
-                        c,
-                        f"- {p['policy']}: {p['count']}개",
-                        margin_x + 6 * mm,
-                        y,
-                        90,
-                        BODY_FONT,
-                    )
-
-                    examples = p.get("examples") or []
-                    if examples:
-                        # 예시 리소스는 한 줄에 콤마로 나열
-                        ex_str = ", ".join(examples)
-                        y = _draw_paragraph(
-                            c,
-                            f"  · 예시 리소스: {ex_str}",
-                            margin_x + 8 * mm,
-                            y,
-                            95,
-                            SMALL_FONT,
-                        )
-
 
         # 산출물 요약
         y = _draw_paragraph(
@@ -1342,7 +966,54 @@ def generate_evidence_pdf(
         y -= 10
         y = _ensure_page_space(c, y, 4, font_size=BODY_FONT)
 
-    y = _start_new_page(c)
+    c.showPage()
+    y = _new_page_y()
+
+    # ─────────────────────────────────────
+    # 5. Prowler FAIL 세부 결과 (전체 목록)
+    # ─────────────────────────────────────
+    y = _draw_heading(c, "5. Prowler FAIL 세부 결과 (전체 목록)", margin_x, y, level=1)
+
+    if prowler_stats.get("total_fail", 0) == 0:
+        y = _draw_paragraph(
+            c,
+            "현재 Prowler 메인 CSV에서 FAIL 결과가 식별되지 않았습니다.",
+            margin_x,
+            y,
+            90,
+            BODY_FONT,
+        )
+    else:
+        for idx_f, fitem in enumerate(prowler_stats["findings"], start=1):
+            header_line = (
+                f"{idx_f}. [{fitem.get('severity','')}] "
+                f"{fitem.get('check_id','')} – {fitem.get('title','')}"
+            )
+            y = _draw_paragraph(c, header_line, margin_x, y, 90, BODY_FONT)
+
+            meta_line = (
+                f"   · 서비스: {fitem.get('service','-')} "
+                f"/ 리전: {fitem.get('region','-')} "
+                f"/ 리소스: {fitem.get('resource','-')}"
+            )
+            y = _draw_paragraph(c, meta_line, margin_x, y, 90, SMALL_FONT)
+
+            reason = fitem.get("reason", "")
+            if reason:
+                y = _draw_paragraph(
+                    c,
+                    f"   · 사유/위험 설명: {reason}",
+                    margin_x,
+                    y,
+                    95,
+                    SMALL_FONT,
+                )
+
+            y -= 6
+            y = _ensure_page_space(c, y, 4, font_size=BODY_FONT)
+
+    c.showPage()
+    y = _new_page_y()
 
     # ─────────────────────────────────────
     # 6. 부록: 산출물 개요
@@ -1380,7 +1051,6 @@ def generate_evidence_pdf(
         "aws_region": aws_region,
         "frameworks": sorted(frameworks_all),
         "prowler": {
-            "total_rows": prowler_stats.get("total_rows", 0),
             "total_fail": prowler_stats.get("total_fail", 0),
             "severity_counts": prowler_stats.get("severity_counts", {}),
         },
