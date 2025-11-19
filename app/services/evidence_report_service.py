@@ -1,6 +1,6 @@
 # ============================================
 # file: app/services/evidence_report_service.py
-# (SAGE 보고서 전용 - 통계/목록 + Prowler/Scout 표 상위10)
+# (SAGE 보고서 전용 - 통계/목록 + Prowler/Scout/Steampipe 표 상위10)
 # ============================================
 from __future__ import annotations
 
@@ -35,11 +35,17 @@ FONT_PATH = BASE_DIR.parent / "fonts" / "GowunDodum-Regular.ttf"
 KOREAN_FONT_NAME = "GowunDodum"
 
 WATERMARK_PATH = BASE_DIR.parent / "assets" / "MADEIT.png"
+WATERMARK_COLOR_PATH = BASE_DIR.parent / "assets" / "MADEIT-color.png"
 try:
     WATERMARK_IMAGE = ImageReader(str(WATERMARK_PATH))
 except Exception as e:
     print(f"[WARN] Failed to load watermark image: {e}")
     WATERMARK_IMAGE = None
+try:
+    WATERMARK_COLOR_IMAGE = ImageReader(str(WATERMARK_COLOR_PATH))
+except Exception as e:
+    print(f"[WARN] Failed to load color watermark image: {e}")
+    WATERMARK_COLOR_IMAGE = None
 
 try:
     pdfmetrics.registerFont(TTFont(KOREAN_FONT_NAME, str(FONT_PATH)))
@@ -63,11 +69,13 @@ except Exception as e:
 # 레이아웃 상수 (줄 간격 넉넉하게)
 TOP_MARGIN_MM = 30
 BOTTOM_MARGIN_MM = 25
-TITLE_FONT = 22
+TITLE_FONT = 30  # 표지 큰 제목 더 크게
 SECTION_TITLE_FONT = 16
 SUBTITLE_FONT = 13
 BODY_FONT = 11
 SMALL_FONT = 9
+CARD_BODY_FONT = BODY_FONT + 3  # 박스(Card) 내부 글자 조금 키움
+CARD_SMALL_FONT = SMALL_FONT + 2
 
 # 제목 간 간격 보정
 HEADING_LEVEL1_EXTRA = 10   # 섹션 제목 뒤 여유
@@ -140,15 +148,16 @@ def _wrap_text(
 
     return lines
 
-def _draw_watermark(c: canvas.Canvas) -> None:
+def _draw_watermark(c: canvas.Canvas, alpha: Optional[float] = None, use_color: bool = False) -> None:
     """
     현재 페이지 가운데에 MADEIT 로고 워터마크를 옅게 깐다.
     """
-    if WATERMARK_IMAGE is None:
+    image = WATERMARK_COLOR_IMAGE if use_color else WATERMARK_IMAGE
+    if image is None:
         return
 
     page_w, page_h = A4
-    iw, ih = WATERMARK_IMAGE.getSize()
+    iw, ih = image.getSize()
 
     # 페이지의 70% 폭, 40% 높이 안에 들어가도록 스케일
     max_w = page_w * 0.7
@@ -164,10 +173,10 @@ def _draw_watermark(c: canvas.Canvas) -> None:
     try:
         # 지원되면 투명도 낮게 설정
         if hasattr(c, "setFillAlpha"):
-            c.setFillAlpha(0.08)  # 필요하면 0.05~0.15 사이로 조절
+            c.setFillAlpha(alpha if alpha is not None else 0.15)  # 기본 워터마크는 더 연하게
 
         c.drawImage(
-            WATERMARK_IMAGE,
+            image,
             x,
             y,
             width=w,
@@ -187,6 +196,7 @@ def _start_new_page(c: canvas.Canvas) -> float:
     새 페이지로 넘어가고 워터마크를 다시 깐 다음, y 시작 위치를 반환.
     """
     c.showPage()
+    # 일반 페이지는 기본 워터마크(흑백, 연하게)
     _draw_watermark(c)
     return _new_page_y()
 
@@ -253,6 +263,7 @@ def _draw_heading(
     x: float,
     y: float,
     level: int = 1,
+    wrap: bool = False,
 ) -> float:
     """
     level 1: 큰 섹션 제목
@@ -266,10 +277,24 @@ def _draw_heading(
         font_size = SUBTITLE_FONT
         extra = HEADING_LEVEL2_EXTRA
 
-    y = _ensure_page_space(c, y, 2, font_size=font_size)
-    c.setFont(KOREAN_FONT_NAME, font_size)
-    c.drawString(x, y, text)
-    y -= font_size + extra
+    right_margin = 25 * mm
+    max_width = A4[0] - x - right_margin
+
+    if wrap:
+        lines = _wrap_text(text, max_width, font_name=KOREAN_FONT_NAME, font_size=font_size)
+        lines = lines or [text]
+        y = _ensure_page_space(c, y, len(lines) + 1, font_size=font_size)
+        c.setFont(KOREAN_FONT_NAME, font_size)
+        leading = font_size + 4
+        for line in lines:
+            c.drawString(x, y, line)
+            y -= leading
+        y -= extra
+    else:
+        y = _ensure_page_space(c, y, 2, font_size=font_size)
+        c.setFont(KOREAN_FONT_NAME, font_size)
+        c.drawString(x, y, text)
+        y -= font_size + extra
     return y
 
 
@@ -1111,10 +1136,39 @@ def _draw_prowler_table(
     INNER_MAX = 55
     INNER_REASON_MAX = 70
 
+    def _estimate_height(fitem: Dict[str, Any]) -> float:
+        """카드 전체 높이 대략 계산(줄바꿈 반영)"""
+        inner_x = margin_x + 4 * mm
+        value_x = inner_x + 32 * mm
+        right_margin = 25 * mm
+        max_w_body = A4[0] - value_x - right_margin
+        max_w_reason = A4[0] - value_x - right_margin
+
+        def lines(text: str, font_size: int) -> int:
+            lw = _wrap_text(text or "", max_w_body, font_name=KOREAN_FONT_NAME, font_size=font_size)
+            return len(lw) or 1
+
+        def lines_reason(text: str) -> int:
+            lw = _wrap_text(text or "", max_w_reason, font_name=KOREAN_FONT_NAME, font_size=SMALL_FONT)
+            return len(lw) or 1
+
+        h = 0
+        h += 5  # pre offset
+        h += CARD_BODY_FONT + 10  # header line
+        h += lines(fitem.get("check_id"), CARD_BODY_FONT) * (CARD_BODY_FONT + 6) + 4
+        h += lines(fitem.get("title"), CARD_BODY_FONT) * (CARD_BODY_FONT + 6) + 4
+        combo = f"{fitem.get('service') or '-'} / {fitem.get('region') or '-'}"
+        h += lines(combo, CARD_BODY_FONT) * (CARD_BODY_FONT + 6) + 4
+        h += lines(fitem.get("resource"), CARD_BODY_FONT) * (CARD_BODY_FONT + 6) + 4
+        h += lines_reason(fitem.get("reason")) * (CARD_SMALL_FONT + 4) + 4
+        # h += 6  # 카드 간 간격(박스 하단 + 여백)
+        return h
+
     # 각 finding을 카드 형태로 반복
     for idx_f, fitem in enumerate(findings[:10], start=1):
-        # 한 카드에 대략 13~15줄 정도 필요하다고 보고 여유 체크
-        y = _ensure_page_space(c, y, 20, font_size=BODY_FONT)
+        est_h = _estimate_height(fitem)
+        if y - est_h < BOTTOM_MARGIN_MM * mm:
+            y = _start_new_page(c)
 
         status = (fitem.get("status") or "UNKNOWN").upper()
         sev = (fitem.get("severity") or "UNKNOWN").upper()
@@ -1135,14 +1189,14 @@ def _draw_prowler_table(
 
         # 1) 첫 줄: No + 상태/심각도
         c.drawString(inner_x, y, "")
-        y-=5
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
+        y-=10
+        c.setFont(KOREAN_FONT_NAME, CARD_BODY_FONT)
         header_text = f"No.{idx_f}  [{status}/{sev}]"
         c.drawString(inner_x, y, header_text)
-        y -= BODY_FONT + 10
+        y -= CARD_BODY_FONT + 10
 
         # 2) 체크 ID
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
+        c.setFont(KOREAN_FONT_NAME, CARD_BODY_FONT)
         c.drawString(label_x, y, "체크 ID:")
         y = _draw_paragraph(
             c,
@@ -1150,12 +1204,12 @@ def _draw_prowler_table(
             value_x,
             y,
             max_chars=INNER_MAX,
-            font_size=BODY_FONT,
+            font_size=CARD_BODY_FONT,
         )
         y -= 4
 
         # 3) 점검 항목(타이틀)
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
+        c.setFont(KOREAN_FONT_NAME, CARD_BODY_FONT)
         c.drawString(label_x, y, "점검 항목:")
         y = _draw_paragraph(
             c,
@@ -1163,12 +1217,12 @@ def _draw_prowler_table(
             value_x,
             y,
             max_chars=INNER_MAX,
-            font_size=BODY_FONT,
+            font_size=CARD_BODY_FONT,
         )
         y -= 4
 
         # 4) 서비스 / 리전
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
+        c.setFont(KOREAN_FONT_NAME, CARD_BODY_FONT)
         c.drawString(label_x, y, "서비스/리전:")
         combo = f"{service} / {region}"
         y = _draw_paragraph(
@@ -1177,12 +1231,12 @@ def _draw_prowler_table(
             value_x,
             y,
             max_chars=INNER_MAX,
-            font_size=BODY_FONT,
+            font_size=CARD_BODY_FONT,
         )
         y -= 4
 
         # 5) 리소스
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
+        c.setFont(KOREAN_FONT_NAME, CARD_BODY_FONT)
         c.drawString(label_x, y, "리소스:")
         y = _draw_paragraph(
             c,
@@ -1190,12 +1244,12 @@ def _draw_prowler_table(
             value_x,
             y,
             max_chars=INNER_MAX,
-            font_size=BODY_FONT,
+            font_size=CARD_BODY_FONT,
         )
         y -= 4
 
         # 6) 사유/위험 설명
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
+        c.setFont(KOREAN_FONT_NAME, CARD_BODY_FONT)
         c.drawString(label_x, y, "사유/위험 설명:")
         y = _draw_paragraph(
             c,
@@ -1203,7 +1257,7 @@ def _draw_prowler_table(
             value_x,
             y,
             max_chars=INNER_REASON_MAX,
-            font_size=SMALL_FONT,
+            font_size=CARD_SMALL_FONT,
         )
         y -= 4
 
@@ -1222,8 +1276,8 @@ def _draw_prowler_table(
         # 카드 사이 간격
         y = box_bottom_y - 10
 
-        # 다음 카드가 페이지 아래에 걸리면 다음 페이지로
-        if y < BOTTOM_MARGIN_MM * mm + 60:
+        # 다음 카드 시작 전에만 페이지 넘기기 (박스 일부 잘림 허용)
+        if y < BOTTOM_MARGIN_MM * mm:
             y = _start_new_page(c)
 
     return y
@@ -1265,8 +1319,32 @@ def _draw_scout_table(
 
     INNER_MAX = 55
 
+    def _estimate_height(fitem: Dict[str, Any]) -> float:
+        inner_x = margin_x + 4 * mm
+        value_x = inner_x + 32 * mm
+        right_margin = 25 * mm
+        max_w = A4[0] - value_x - right_margin
+
+        def lines(text: str, font_size: int) -> int:
+            lw = _wrap_text(text or "", max_w, font_name=KOREAN_FONT_NAME, font_size=font_size)
+            return len(lw) or 1
+
+        h = 5  # pre offset
+        h += CARD_BODY_FONT + 10  # header
+        h += lines(f"{fitem.get('service') or '-'} / {fitem.get('id') or '-'}", CARD_BODY_FONT) * (CARD_BODY_FONT + 6) + 4
+        h += lines(fitem.get("description"), CARD_BODY_FONT) * (CARD_BODY_FONT + 6) + 4
+        if fitem.get("rationale"):
+            h += lines(fitem.get("rationale"), CARD_SMALL_FONT) * (CARD_SMALL_FONT + 4) + 4
+        if fitem.get("examples"):
+            examples_txt = "; ".join(fitem.get("examples") or [])
+            h += lines(examples_txt, CARD_SMALL_FONT) * (CARD_SMALL_FONT + 4) + 4
+        h += 6
+        return h
+
     for idx_f, fitem in enumerate(findings[:10], start=1):
-        y = _ensure_page_space(c, y, 18, font_size=BODY_FONT)
+        est_h = _estimate_height(fitem)
+        if y - est_h < BOTTOM_MARGIN_MM * mm:
+            y = _start_new_page(c)
 
         sev = (fitem.get("severity") or "UNKNOWN").upper()
         flagged = int(fitem.get("flagged_items") or 0)
@@ -1280,10 +1358,10 @@ def _draw_scout_table(
         inner_x = box_left + 4 * mm
         label_x = inner_x
         value_x = inner_x + 32 * mm
-        y -= 4
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
+        y-=10
+        c.setFont(KOREAN_FONT_NAME, CARD_BODY_FONT)
         c.drawString(inner_x, y, f"No.{idx_f}  [{sev}] flagged={flagged}")
-        y -= BODY_FONT + 10
+        y -= CARD_BODY_FONT + 10
 
         c.drawString(label_x, y, "서비스/체크:")
         y = _draw_paragraph(
@@ -1292,7 +1370,7 @@ def _draw_scout_table(
             value_x,
             y,
             max_chars=INNER_MAX,
-            font_size=BODY_FONT,
+            font_size=CARD_BODY_FONT,
         )
         y -= 4
 
@@ -1303,7 +1381,7 @@ def _draw_scout_table(
             value_x,
             y,
             max_chars=INNER_MAX,
-            font_size=BODY_FONT,
+            font_size=CARD_BODY_FONT,
         )
         y -= 4
 
@@ -1315,7 +1393,7 @@ def _draw_scout_table(
                 value_x,
                 y,
                 max_chars=INNER_MAX,
-                font_size=SMALL_FONT,
+                font_size=CARD_SMALL_FONT,
             )
             y -= 4
 
@@ -1327,7 +1405,7 @@ def _draw_scout_table(
                 value_x,
                 y,
                 max_chars=INNER_MAX,
-                font_size=SMALL_FONT,
+                font_size=CARD_SMALL_FONT,
             )
             y -= 4
 
@@ -1341,7 +1419,7 @@ def _draw_scout_table(
         )
 
         y = box_bottom_y - 10
-        if y < BOTTOM_MARGIN_MM * mm + 60:
+        if y < BOTTOM_MARGIN_MM * mm:
             y = _start_new_page(c)
 
     return y
@@ -1383,8 +1461,31 @@ def _draw_steampipe_table(
 
     INNER_MAX = 55
 
+    def _estimate_height(ctrl: Dict[str, Any]) -> float:
+        inner_x = margin_x + 4 * mm
+        value_x = inner_x + 32 * mm
+        right_margin = 25 * mm
+        max_w = A4[0] - value_x - right_margin
+
+        def lines(text: str, font_size: int) -> int:
+            lw = _wrap_text(text or "", max_w, font_name=KOREAN_FONT_NAME, font_size=font_size)
+            return len(lw) or 1
+
+        h = 5  # pre offset
+        h += CARD_BODY_FONT + 10  # header
+        h += lines(f"{ctrl.get('id') or '-'} – {ctrl.get('title') or '-'}", CARD_BODY_FONT) * (CARD_BODY_FONT + 6) + 4
+        h += lines(ctrl.get("service"), CARD_BODY_FONT) * (CARD_BODY_FONT + 6) + 4
+        h += lines(ctrl.get("description"), CARD_BODY_FONT) * (CARD_BODY_FONT + 6) + 4
+        if ctrl.get("examples"):
+            examples_txt = "; ".join(ctrl.get("examples") or [])
+            h += lines(examples_txt, CARD_SMALL_FONT) * (CARD_SMALL_FONT + 4) + 4
+        h += 6
+        return h
+
     for idx_c, ctrl in enumerate(controls[:10], start=1):
-        y = _ensure_page_space(c, y, 18, font_size=BODY_FONT)
+        est_h = _estimate_height(ctrl)
+        if y - est_h < BOTTOM_MARGIN_MM * mm:
+            y = _start_new_page(c)
 
         sev = (ctrl.get("severity") or "UNKNOWN").upper()
         alarm = int(ctrl.get("alarm") or 0)
@@ -1401,10 +1502,10 @@ def _draw_steampipe_table(
         inner_x = box_left + 4 * mm
         label_x = inner_x
         value_x = inner_x + 32 * mm
-        y -= 4
-        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
+        y-=10
+        c.setFont(KOREAN_FONT_NAME, CARD_BODY_FONT)
         c.drawString(inner_x, y, f"No.{idx_c}  [{sev}] alarm={alarm} ok={ok}")
-        y -= BODY_FONT + 10
+        y -= CARD_BODY_FONT + 10
 
         c.drawString(label_x, y, "컨트롤:")
         y = _draw_paragraph(
@@ -1413,7 +1514,7 @@ def _draw_steampipe_table(
             value_x,
             y,
             max_chars=INNER_MAX,
-            font_size=BODY_FONT,
+            font_size=CARD_BODY_FONT,
         )
         y -= 4
 
@@ -1424,7 +1525,7 @@ def _draw_steampipe_table(
             value_x,
             y,
             max_chars=INNER_MAX,
-            font_size=BODY_FONT,
+            font_size=CARD_BODY_FONT,
         )
         y -= 4
 
@@ -1435,7 +1536,7 @@ def _draw_steampipe_table(
             value_x,
             y,
             max_chars=INNER_MAX,
-            font_size=BODY_FONT,
+            font_size=CARD_BODY_FONT,
         )
         y -= 4
 
@@ -1447,7 +1548,7 @@ def _draw_steampipe_table(
                 value_x,
                 y,
                 max_chars=INNER_MAX,
-                font_size=SMALL_FONT,
+                font_size=CARD_SMALL_FONT,
             )
             y -= 4
 
@@ -1461,7 +1562,7 @@ def _draw_steampipe_table(
         )
 
         y = box_bottom_y - 10
-        if y < BOTTOM_MARGIN_MM * mm + 60:
+        if y < BOTTOM_MARGIN_MM * mm:
             y = _start_new_page(c)
 
     return y
@@ -1481,11 +1582,10 @@ def generate_evidence_pdf(
 
     섹션 구성:
       1. 종합 요약
-      2. 컴플라이언스 관점 요약
-      3. 세부 취약점 항목(템플릿 설명)
-      4. 주요 진단 결과 (Prowler/Scout 상위 10건 표)
-      5. 도구별 실행 상세
-      6. 부록 – 도구별 산출물 개요
+      2. 세부 취약점 항목(템플릿 설명)
+      3. 주요 진단 결과 (Prowler/Scout/Steampipe 상위 10건 표)
+      4. 도구별 실행 상세
+      5. 부록 – 도구별 산출물 개요
     """
     if not codes:
         codes = list(DEFAULT_TOOL_CODES)
@@ -1508,8 +1608,6 @@ def generate_evidence_pdf(
     context = _extract_common_context(tool_meta)
     aws_profile = context["profile"]
     aws_region = context["region"]
-    frameworks_str = ", ".join(sorted(frameworks_all)) if frameworks_all else "-"
-
     # 1-a) 통계 분석 (Prowler / Steampipe / Custodian)
     prowler_stats = _analyze_prowler_from_meta(tool_meta.get("prowler"))
     steampipe_stats = _analyze_steampipe_from_meta(tool_meta.get("steampipe"))
@@ -1526,26 +1624,30 @@ def generate_evidence_pdf(
     c = canvas.Canvas(pdf_path, pagesize=A4)
     width, height = A4
     margin_x = 25 * mm
-    _draw_watermark(c)
+    _draw_watermark(c, alpha=0.25, use_color=True)
     y = _new_page_y()
 
     # ─────────────────────────────────────
     # 0. 표지
     # ─────────────────────────────────────
-    c.setFont(KOREAN_FONT_NAME, TITLE_FONT)
+    # 표지 상단 제목(볼드, 크게)
+    c.setFont(BOLD_FONT_NAME, TITLE_FONT)
     c.drawString(margin_x, y, "SAGE 클라우드 보안·컴플라이언스")
     y -= TITLE_FONT + 10
     c.drawString(margin_x, y, "취약점 분석·평가 증적 보고서")
     y -= TITLE_FONT + 20
 
-    c.setFont(KOREAN_FONT_NAME, SUBTITLE_FONT)
+    # 메타 정보는 표지 하단 쪽에 배치
+    y = BOTTOM_MARGIN_MM * mm + 40 * mm
+    meta_font = SUBTITLE_FONT + 3  # 작성일시/메타 정보 더 크게
+    c.setFont(KOREAN_FONT_NAME, meta_font)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.drawString(margin_x, y, f"작성일시: {now_str}")
-    y -= SUBTITLE_FONT + 8
+    y -= meta_font + 8
     c.drawString(margin_x, y, f"AWS Profile: {aws_profile}")
-    y -= SUBTITLE_FONT + 8
+    y -= meta_font + 8
     c.drawString(margin_x, y, f"대상 리전: {aws_region}")
-    y -= SUBTITLE_FONT + 8
+    y -= meta_font + 8
 
     tools_label = ", ".join(
         get_item_by_code(code).get("name", code)
@@ -1597,24 +1699,8 @@ def generate_evidence_pdf(
         y = _draw_paragraph(c, text, margin_x, y, max_chars=80, font_size=BODY_FONT)
         y -= 8
 
-    # 1-2 규제·컴플라이언스 프레임워크 관점 요약
-    y = _draw_heading(c, "1-2. 규제·컴플라이언스 프레임워크 관점 요약", margin_x, y, level=2)
-    if frameworks_str != "-":
-        text = (
-            "도구 산출물 분석 결과, 다음 컴플라이언스 프레임워크 관점의 점검 결과가 생성되었다: "
-            f"{frameworks_str}. "
-            "각 프레임워크별 상세 위반 여부·항목은 개별 CSV/JSON 리포트에서 확인할 수 있다."
-        )
-    else:
-        text = (
-            "현재 수집된 산출물에서는 특정 규제·컴플라이언스 프레임워크명을 식별하지 못하였다. "
-            "Prowler/Steampipe 등의 출력 포맷 및 파일명을 기반으로 후속 분석이 가능하다."
-        )
-    y = _draw_paragraph(c, text, margin_x, y, max_chars=80, font_size=BODY_FONT)
-    y -= 6
-
-    # 1-3 개선 우선순위 (템플릿)
-    y = _draw_heading(c, "1-3. 개선 우선순위(템플릿)", margin_x, y, level=2)
+    # 1-2 개선 우선순위 (템플릿)
+    y = _draw_heading(c, "1-2. 개선 우선순위(템플릿)", margin_x, y, level=2)
     priority_lines = [
         "① CA-03 클라우드 계정 루트·관리자 권한 관리",
         "② LG-01 클라우드 감사 로그(CloudTrail 등) 설정 보강",
@@ -1627,30 +1713,14 @@ def generate_evidence_pdf(
     y = _start_new_page(c)
 
     # ─────────────────────────────────────
-    # 2. 컴플라이언스 관점 요약
     # ─────────────────────────────────────
-    y = _draw_heading(c, "2. 컴플라이언스 관점 요약", margin_x, y, level=1)
-
-    for item in DETAILED_ITEMS:
-        summary = (
-            f"[{item['code']}] {item['area']} – {item['title']}\n"
-            f"· 관련 규제: ISMS-P / ISO27001 / (환경에 따라 추가 매핑)\n"
-            f"· 영향도: High (템플릿 기준)\n"
-            f"· 근거 도구: {item['tools']}"
-        )
-        y = _draw_paragraph(c, summary, margin_x, y, max_chars=90, font_size=BODY_FONT)
-        y -= 6
-
-    y = _start_new_page(c)
-
-    # ─────────────────────────────────────
-    # 3. 세부 취약점 항목 (개념 설명)
+    # 2. 세부 취약점 항목 (개념 설명)
     # ─────────────────────────────────────
     # ─────────────────────────────────────
-    # 3. 세부 취약점 항목 (개념 설명)
+    # 2. 세부 취약점 항목 (개념 설명)
     # ─────────────────────────────────────
     # ─────────────────────────────────────
-    y = _draw_heading(c, "3. 세부 취약점 항목 (Prowler 기반 위협 설명)", margin_x, y, level=1)
+    y = _draw_heading(c, "2. 세부 취약점 항목 (Prowler 기반 위협 설명)", margin_x, y, level=1)
 
     threat_items = _build_prowler_threat_items(prowler_stats, max_items=10)
 
@@ -1674,11 +1744,11 @@ def generate_evidence_pdf(
 
         for idx, t in enumerate(threat_items, start=1):
             title = (
-                f"3-{idx}. [{t['severity']}] {t['check_id']} – {t['title']}"
+                f"2-{idx}. [{t['severity']}] {t['check_id']} – {t['title']}"
                 if t.get("check_id")
-                else f"3-{idx}. [{t['severity']}] {t['title']}"
+                else f"2-{idx}. [{t['severity']}] {t['title']}"
             )
-            y = _draw_heading(c, title, margin_x, y, level=2)
+            y = _draw_heading(c, title, margin_x, y, level=2, wrap=True)
 
             # FAIL 건수
             y = _draw_paragraph(
@@ -1735,43 +1805,45 @@ def generate_evidence_pdf(
                     BODY_FONT,
                 )
 
-            y -= 8
-            y = _ensure_page_space(c, y, 4, font_size=BODY_FONT)
+            # 항목 간 간격을 더 넓게 확보
+            y -= 20
+            y = _ensure_page_space(c, y, 6, font_size=BODY_FONT)
 
-
-
-
-
+    y = _start_new_page(c)
 
     # ─────────────────────────────────────
-    # 4. 주요 진단 결과 (상위 10건)
+    # 3. 주요 진단 결과 (상위 10건)
     # ─────────────────────────────────────
     y -= 10
-    y = _draw_heading(c, "4. 주요 진단 결과 (상위 10건)", margin_x, y, level=1)
+    y = _draw_heading(c, "3. 주요 진단 결과 (상위 10건)", margin_x, y, level=1)
 
-    # 4-1. Prowler
-    y = _draw_heading(c, "4-1. Prowler (상위 10건)", margin_x, y, level=2)
+    # 3-1. Prowler
+    y = _draw_heading(c, "3-1. Prowler (상위 10건)", margin_x, y, level=2)
     findings = prowler_stats.get("findings") or []
     y = _draw_prowler_table(c, findings, margin_x, y)
 
-    # 4-2. Scout Suite
+    # 섹션 종료 후 페이지 분리
+    y = _start_new_page(c)
+
+    # 3-2. Scout Suite
     y -= 6
-    y = _ensure_page_space(c, y, 4, font_size=BODY_FONT)
-    y = _draw_heading(c, "4-2. Scout Suite (상위 10건)", margin_x, y, level=2)
+    y = _draw_heading(c, "3-2. Scout Suite (상위 10건)", margin_x, y, level=2)
     y = _draw_scout_table(c, scout_stats.get("findings") or [], margin_x, y)
 
-    # 4-3. Steampipe
+    # 섹션 종료 후 페이지 분리
+    y = _start_new_page(c)
+
+    # 3-3. Steampipe
     y -= 6
-    y = _ensure_page_space(c, y, 4, font_size=BODY_FONT)
-    y = _draw_heading(c, "4-3. Steampipe (상위 10건)", margin_x, y, level=2)
+    y = _draw_heading(c, "3-3. Steampipe (상위 10건)", margin_x, y, level=2)
     y = _draw_steampipe_table(c, steampipe_stats.get("controls") or [], margin_x, y)
 
     y = _start_new_page(c)
 
     # ─────────────────────────────────────
-    # 5. 도구별 실행 상세
+    # 4. 도구별 실행 상세
     # ─────────────────────────────────────
-    y = _draw_heading(c, "5. 도구별 실행 상세", margin_x, y, level=1)
+    y = _draw_heading(c, "4. 도구별 실행 상세", margin_x, y, level=1)
 
     for code in codes:
         meta = tool_meta.get(code) or {}
@@ -1972,9 +2044,9 @@ def generate_evidence_pdf(
     y = _start_new_page(c)
 
     # ─────────────────────────────────────
-    # 6. 부록: 산출물 개요
+    # 5. 부록: 산출물 개요
     # ─────────────────────────────────────
-    y = _draw_heading(c, "6. 부록 – 도구별 산출물 개요", margin_x, y, level=1)
+    y = _draw_heading(c, "5. 부록 – 도구별 산출물 개요", margin_x, y, level=1)
 
     for code in codes:
         meta = tool_meta.get(code) or {}
