@@ -1,6 +1,6 @@
-FROM python:3.11-slim AS base
+FROM python:3.11-slim
 
-ENV APP_HOME=/opt/DSPM_Opensource-Runner \
+ENV APP_HOME=/opt/dspm-oss \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
@@ -8,11 +8,18 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends git && \
     rm -rf /var/lib/apt/lists/*
 
-RUN git clone https://github.com/BOB-DSPM/DSPM_Opensource-Runner.git "$APP_HOME"
+RUN groupadd --system dspm && \
+    useradd --system --gid dspm --home-dir "$APP_HOME" --create-home dspm
 
 WORKDIR $APP_HOME
 
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+RUN chown -R dspm:dspm "$APP_HOME"
+
+USER dspm
 
 EXPOSE 8800
 

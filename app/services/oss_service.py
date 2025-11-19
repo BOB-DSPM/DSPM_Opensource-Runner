@@ -19,12 +19,22 @@ from pathlib import Path
 import zipfile  # ScoutSuite 리포트 zip 생성을 위해 추가
 
 from ..utils.loader import list_items, get_item_by_code, merge
+from ..utils.aws_credentials import (
+    prepare_aws_execution_env,
+    IAMCredentialError,
+)
 
 # ──────────────────────────────────────────────────────────────
 # 상수/공통
 # ──────────────────────────────────────────────────────────────
 LATEST_DIR = "./runs/_latest"
 RUNS_ROOT = "./runs"
+SENSITIVE_PAYLOAD_KEYS = {
+    "policy_inline",
+    "policy_text",
+    "policy_yaml",
+    "iam_external_id",
+}
 
 
 def _split_vals(v: Any) -> List[str]:
@@ -170,6 +180,29 @@ def _clip(s: str, limit: int = 200_000) -> str:
     if len(s) > limit:
         return s[:limit] + f"\n...[truncated {len(s)-limit} bytes]"
     return s
+
+
+def _prepare_process_env(
+    payload: Dict[str, Any]
+) -> Tuple[Dict[str, str], Optional[Dict[str, Any]]]:
+    """
+    Construct the environment variables passed to subprocesses, enforcing IAM
+    role usage when requested and falling back to AWS profiles only for
+    backward compatibility.
+    """
+    env = os.environ.copy()
+    profile = str(payload.get("profile") or "").strip()
+    iam_role = str(payload.get("iam_role_arn") or "").strip()
+    if profile and iam_role:
+        raise IAMCredentialError(
+            "AWS profile and iam_role_arn cannot be used simultaneously."
+        )
+    if profile:
+        env["AWS_PROFILE"] = profile
+
+    aws_env, metadata = prepare_aws_execution_env(payload)
+    env.update(aws_env)
+    return env, metadata
 
 
 # ──────────────────────────────────────────────────────────────
@@ -618,6 +651,38 @@ def _prowler_detail(base: Dict[str, Any]) -> Dict[str, Any]:
             "visible_if": {"provider": "aws"},
         },
         {
+            "key": "iam_role_arn",
+            "label": "IAM Role ARN",
+            "type": "string",
+            "required": False,
+            "placeholder": "arn:aws:iam::123456789012:role/SageScanner",
+            "description": "IRSA/Pod Identity Credential을 사용해 교차 계정 AssumeRole 합니다.",
+            "visible_if": {"provider": "aws"},
+        },
+        {
+            "key": "iam_session_name",
+            "label": "IAM Session Name",
+            "type": "string",
+            "required": False,
+            "placeholder": "sage-oss-session",
+            "visible_if": {"provider": "aws"},
+        },
+        {
+            "key": "iam_session_duration",
+            "label": "IAM Session Duration (sec)",
+            "type": "string",
+            "required": False,
+            "placeholder": "900-43200",
+            "visible_if": {"provider": "aws"},
+        },
+        {
+            "key": "iam_external_id",
+            "label": "IAM External ID",
+            "type": "string",
+            "required": False,
+            "visible_if": {"provider": "aws"},
+        },
+        {
             "key": "list",
             "label": "List Mode",
             "type": "enum",
@@ -1039,6 +1104,30 @@ def _custodian_detail(base: Dict[str, Any]) -> Dict[str, Any]:
             "placeholder": "ap-northeast-2",
         },
         {
+            "key": "iam_role_arn",
+            "label": "IAM Role ARN",
+            "type": "string",
+            "placeholder": "arn:aws:iam::123456789012:role/SageScanner",
+            "description": "컨테이너에 부여된 IAM 권한으로 교차 계정 AssumeRole 합니다.",
+        },
+        {
+            "key": "iam_session_name",
+            "label": "IAM Session Name",
+            "type": "string",
+            "placeholder": "sage-oss-session",
+        },
+        {
+            "key": "iam_session_duration",
+            "label": "IAM Session Duration (sec)",
+            "type": "string",
+            "placeholder": "900-43200",
+        },
+        {
+            "key": "iam_external_id",
+            "label": "IAM External ID",
+            "type": "string",
+        },
+        {
             "key": "timeout_sec",
             "label": "Timeout (sec)",
             "type": "string",
@@ -1143,6 +1232,34 @@ def _steampipe_detail(base: Dict[str, Any]) -> Dict[str, Any]:
             "placeholder": "1200",
         },
         {
+            "key": "iam_role_arn",
+            "label": "IAM Role ARN",
+            "type": "string",
+            "required": False,
+            "placeholder": "arn:aws:iam::123456789012:role/SageScanner",
+            "description": "Powerpipe 실행 전에 STS AssumeRole을 통해 임시 자격 증명을 주입합니다.",
+        },
+        {
+            "key": "iam_session_name",
+            "label": "IAM Session Name",
+            "type": "string",
+            "required": False,
+            "placeholder": "sage-oss-session",
+        },
+        {
+            "key": "iam_session_duration",
+            "label": "IAM Session Duration (sec)",
+            "type": "string",
+            "required": False,
+            "placeholder": "900-43200",
+        },
+        {
+            "key": "iam_external_id",
+            "label": "IAM External ID",
+            "type": "string",
+            "required": False,
+        },
+        {
             "key": "pip_install",
             "label": "Auto pip install",
             "type": "enum",
@@ -1215,6 +1332,37 @@ def _scout_detail(base: Dict[str, Any]) -> Dict[str, Any]:
             "type": "string",
             "required": False,
             "placeholder": "ap-northeast-2",
+            "visible_if": {"provider": "aws"},
+        },
+        {
+            "key": "iam_role_arn",
+            "label": "IAM Role ARN",
+            "type": "string",
+            "required": False,
+            "placeholder": "arn:aws:iam::123456789012:role/SageScanner",
+            "visible_if": {"provider": "aws"},
+        },
+        {
+            "key": "iam_session_name",
+            "label": "IAM Session Name",
+            "type": "string",
+            "required": False,
+            "placeholder": "sage-oss-session",
+            "visible_if": {"provider": "aws"},
+        },
+        {
+            "key": "iam_session_duration",
+            "label": "IAM Session Duration (sec)",
+            "type": "string",
+            "required": False,
+            "placeholder": "900-43200",
+            "visible_if": {"provider": "aws"},
+        },
+        {
+            "key": "iam_external_id",
+            "label": "IAM External ID",
+            "type": "string",
+            "required": False,
             "visible_if": {"provider": "aws"},
         },
         {
@@ -1452,9 +1600,14 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         install_cmds=install_cmds,
     )
 
-    env = os.environ.copy()
-    if payload.get("profile"):
-        env["AWS_PROFILE"] = str(payload["profile"])
+    try:
+        env, iam_context = _prepare_process_env(payload)
+    except IAMCredentialError as exc:
+        return {
+            "error": 400,
+            "message": f"IAM credential error: {exc}",
+            "preinstall": preinstall_info,
+        }
 
     try:
         timeout_sec = int(str(payload.get("timeout_sec", "600")))
@@ -1492,7 +1645,7 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         payload_redacted = {
             k: v
             for k, v in (payload or {}).items()
-            if k not in {"policy_inline", "policy_text", "policy_yaml"}
+            if k not in SENSITIVE_PAYLOAD_KEYS
         }
         with open(result_path, "w", encoding="utf-8") as f:
             json.dump(
@@ -1509,6 +1662,7 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                     "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
                     "preinstall": preinstall_info,
                     "payload": payload_redacted,
+                    "iam": iam_context,
                 },
                 f,
                 ensure_ascii=False,
@@ -1529,6 +1683,7 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "files": files,
         "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
         "preinstall": preinstall_info,
+        "iam": iam_context,
     }
 
 
@@ -1585,9 +1740,11 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
         timeout_sec = int(str(payload.get("timeout_sec", "600")))
     except ValueError:
         timeout_sec = 600
-    env = os.environ.copy()
-    if payload.get("profile"):
-        env["AWS_PROFILE"] = str(payload["profile"])
+    try:
+        env, iam_context = _prepare_process_env(payload)
+    except IAMCredentialError as exc:
+        yield (f'{{"error":400,"message":"IAM credential error: {exc}"}}\n').encode()
+        return
 
     if code not in TOOLS:
         yield b'{"error":400,"message":"unsupported tool"}\n'
@@ -1697,7 +1854,7 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
         payload_redacted = {
             k: v
             for k, v in (payload or {}).items()
-            if k not in {"policy_inline", "policy_text", "policy_yaml"}
+            if k not in SENSITIVE_PAYLOAD_KEYS
         }
         with open(result_path, "w", encoding="utf-8") as f:
             json.dump(
@@ -1714,6 +1871,7 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
                     "note": "stream run summary",
                     "preinstall": None,
                     "payload": payload_redacted,
+                    "iam": iam_context,
                 },
                 f,
                 ensure_ascii=False,
@@ -1751,9 +1909,10 @@ def _run_custodian_with_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if (r := payload.get("region")):
         args += ["-r", str(r)]
 
-    env = os.environ.copy()
-    if payload.get("profile"):
-        env["AWS_PROFILE"] = str(payload["profile"])
+    try:
+        env, iam_context = _prepare_process_env(payload)
+    except IAMCredentialError as exc:
+        return {"error": 400, "message": f"IAM credential error: {exc}"}
 
     try:
         timeout_sec = int(str(payload.get("timeout_sec", "1200")))
@@ -1779,7 +1938,7 @@ def _run_custodian_with_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload_redacted = {
             k: v
             for k, v in (payload or {}).items()
-            if k not in {"policy_inline", "policy_text", "policy_yaml"}
+            if k not in SENSITIVE_PAYLOAD_KEYS
         }
         with open(result_path, "w", encoding="utf-8") as f:
             json.dump(
@@ -1796,6 +1955,7 @@ def _run_custodian_with_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
                     "preinstall": preinstall,
                     "payload": payload_redacted,
+                    "iam": iam_context,
                 },
                 f,
                 ensure_ascii=False,
@@ -1816,4 +1976,5 @@ def _run_custodian_with_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "files": files,
         "note": "stdout/stderr는 길이 제한으로 잘릴 수 있습니다.",
         "preinstall": preinstall,
+        "iam": iam_context,
     }
