@@ -1,6 +1,6 @@
 # ============================================
 # file: app/services/evidence_report_service.py
-# (SAGE 보고서 전용 - 통계/목록 + Prowler 표 상위20)
+# (SAGE 보고서 전용 - 통계/목록 + Prowler/Scout 표 상위10)
 # ============================================
 from __future__ import annotations
 
@@ -538,7 +538,8 @@ def _analyze_prowler_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]
 
 def _analyze_steampipe_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Steampipe report JSON(steampipe_report.json)을 읽어 alarm/ok/info 통계를 만든다.
+    Steampipe report JSON(steampipe_report.json)을 읽어 alarm/ok/info 통계와
+    상위 컨트롤(alarm 많은 순) 정보를 만든다.
     반환:
     {
       "total_controls": int,
@@ -546,6 +547,22 @@ def _analyze_steampipe_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, An
       "ok": int,
       "info": int,
       "unknown": int,
+      "severity_counts": {...},
+      "controls": [
+         {
+           "id": "...",
+           "title": "...",
+           "severity": "...",
+           "severity_order": int,
+           "alarm": n,
+           "ok": m,
+           "info": k,
+           "skip": s,
+           "service": "...",
+           "description": "...",
+           "examples": [...]
+         }
+      ]
     }
     """
     stats = {
@@ -555,6 +572,8 @@ def _analyze_steampipe_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, An
         "info": 0,
         "skip": 0,
         "unknown": 0,
+        "severity_counts": {},
+        "controls": [],
     }
     if not meta:
         return stats
@@ -581,6 +600,46 @@ def _analyze_steampipe_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, An
         print(f"[WARN] Failed to load steampipe_report.json: {e}")
         return stats
 
+    severity_order = {
+        "CRITICAL": 0,
+        "HIGH": 1,
+        "MEDIUM": 2,
+        "LOW": 3,
+        "INFO": 4,
+        "UNKNOWN": 5,
+    }
+
+    def _extract_examples(results: Any) -> List[str]:
+        examples: List[str] = []
+        if isinstance(results, list):
+            for row in results:
+                if len(examples) >= 3:
+                    break
+                if isinstance(row, dict):
+                    cand = (
+                        row.get("resource") or row.get("resource_id") or row.get("title") or row.get("name")
+                    )
+                    if cand:
+                        examples.append(str(cand))
+                    elif "_resource" in row:
+                        examples.append(str(row["_resource"]))
+                    else:
+                        examples.append(str(next(iter(row.values()))))
+                else:
+                    examples.append(str(row))
+        elif isinstance(results, dict):
+            for v in results.values():
+                if len(examples) >= 3:
+                    break
+                if isinstance(v, list):
+                    for vv in v:
+                        examples.append(str(vv))
+                        if len(examples) >= 3:
+                            break
+                else:
+                    examples.append(str(v))
+        return examples
+
     def walk_groups(groups: List[Dict[str, Any]]) -> None:
         if not groups:
             return
@@ -601,6 +660,38 @@ def _analyze_steampipe_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, An
                 if alarm == ok == info == skip == 0:
                     stats["unknown"] += 1
 
+                ctrl_id = str(c.get("name") or c.get("id") or c.get("title") or "")
+                ctrl_title = str(c.get("title") or ctrl_id or "-")
+                severity = str(c.get("severity") or "UNKNOWN").upper()
+                sev_order = severity_order.get(severity, severity_order["UNKNOWN"])
+                service = (
+                    c.get("service")
+                    or (c.get("tags") or {}).get("service")
+                    or (c.get("category"))
+                    or "-"
+                )
+                desc = c.get("description") or c.get("documentation") or ""
+                examples = _extract_examples(c.get("results") or [])
+
+                if alarm > 0:
+                    stats["severity_counts"][severity] = stats["severity_counts"].get(severity, 0) + alarm
+
+                    stats["controls"].append(
+                        {
+                            "id": ctrl_id or "-",
+                            "title": ctrl_title,
+                            "severity": severity,
+                            "severity_order": sev_order,
+                            "alarm": alarm,
+                            "ok": ok,
+                            "info": info,
+                            "skip": skip,
+                            "service": service,
+                            "description": desc,
+                            "examples": examples,
+                        }
+                    )
+
             sub = g.get("groups") or []
             if sub:
                 walk_groups(sub)
@@ -609,6 +700,14 @@ def _analyze_steampipe_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, An
         walk_groups(data.get("groups") or [])
     except Exception as e:
         print(f"[WARN] Failed to parse steampipe groups: {e}")
+
+    stats["controls"].sort(
+        key=lambda x: (
+            x["severity_order"],
+            -x["alarm"],
+            x.get("id") or "",
+        )
+    )
 
     return stats
 
@@ -741,6 +840,114 @@ def _analyze_custodian_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, An
     return result
 
 
+def _analyze_scout_from_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Scout Suite 결과 JS(scoutsuite_results_*.js)를 읽어 상위 취약점 목록을 만든다.
+    - level(danger/warning/info)과 flagged_items를 사용해 정렬
+    """
+    result = {
+        "findings": [],
+        "severity_counts": {},
+        "total_flagged": 0,
+        "summary": {},
+    }
+    if not meta:
+        return result
+
+    files = meta.get("files") or []
+    target = None
+    for f in files:
+        p = str(f.get("path", ""))
+        if p.endswith(".js") and "scoutsuite-results" in p and "results" in os.path.basename(p):
+            target = f
+            break
+    if not target:
+        return result
+
+    js_path = _join_file_path(meta, target["path"])
+    if not os.path.exists(js_path):
+        print(f"[WARN] ScoutSuite results JS not found: {js_path}")
+        return result
+
+    try:
+        raw = Path(js_path).read_text(encoding="utf-8", errors="replace")
+        parts = raw.split("=", 1)
+        if len(parts) < 2:
+            return result
+        json_text = parts[1].strip()
+        if json_text.endswith(";"):
+            json_text = json_text[:-1].strip()
+        data = json.loads(json_text)
+    except Exception as e:
+        print(f"[WARN] Failed to parse ScoutSuite results: {e}")
+        return result
+
+    result["summary"] = data.get("last_run", {}).get("summary", {})
+
+    severity_map = {
+        "danger": ("CRITICAL", 0),
+        "warning": ("MEDIUM", 1),
+        "info": ("INFO", 2),
+        "ok": ("INFO", 3),
+    }
+
+    findings: List[Dict[str, Any]] = []
+    services = data.get("services") or {}
+    for svc_name, svc in services.items():
+        for fid, fobj in (svc.get("findings") or {}).items():
+            flagged = int(fobj.get("flagged_items") or 0)
+            if flagged <= 0:
+                continue
+            level = str(fobj.get("level") or "info").lower()
+            severity, order = severity_map.get(level, ("UNKNOWN", 5))
+
+            desc = fobj.get("description") or fobj.get("rationale") or fid
+            rationale = fobj.get("rationale") or ""
+
+            examples: List[str] = []
+            items_field = fobj.get("items")
+            if isinstance(items_field, list):
+                examples = [str(x) for x in items_field[:3]]
+            elif isinstance(items_field, dict):
+                for val in items_field.values():
+                    if len(examples) >= 3:
+                        break
+                    if isinstance(val, list):
+                        for v in val:
+                            examples.append(str(v))
+                            if len(examples) >= 3:
+                                break
+                    else:
+                        examples.append(str(val))
+
+            findings.append(
+                {
+                    "id": fid,
+                    "service": svc_name,
+                    "severity": severity,
+                    "severity_order": order,
+                    "flagged_items": flagged,
+                    "description": desc,
+                    "rationale": rationale,
+                    "examples": examples,
+                }
+            )
+            result["severity_counts"][severity] = (
+                result["severity_counts"].get(severity, 0) + flagged
+            )
+            result["total_flagged"] += flagged
+
+    findings.sort(
+        key=lambda x: (
+            x["severity_order"],
+            -x["flagged_items"],
+            x.get("service") or "",
+            x.get("id") or "",
+        )
+    )
+    result["findings"] = findings
+    return result
+
 
 def _merge_severity_counts(*dicts: Dict[str, int]) -> Dict[str, int]:
     merged: Dict[str, int] = {}
@@ -750,8 +957,109 @@ def _merge_severity_counts(*dicts: Dict[str, int]) -> Dict[str, int]:
     return merged
 
 
+def _build_prowler_threat_items(
+    prowler_stats: Dict[str, Any],
+    max_items: int = 10,
+) -> List[Dict[str, Any]]:
+    """
+    Prowler FAIL 결과를 체크 ID/제목 단위로 묶어서
+    '세부 위협 항목' 목록을 만든다.
+
+    반환 예:
+    [
+      {
+        "check_id": "iam_user_no_mfa",
+        "title": "Ensure IAM users have MFA enabled",
+        "severity": "HIGH",
+        "fail_count": 12,
+        "service": "iam",
+        "region": "ap-northeast-2",
+        "resource": "user/demo",
+        "reason": "MFA is not enabled for IAM user ..."
+      },
+      ...
+    ]
+    """
+    findings = prowler_stats.get("findings") or []
+    if not findings:
+        return []
+
+    # FAIL 결과만 사용
+    fail_rows = [
+        f for f in findings
+        if (f.get("status") or "").upper() == "FAIL"
+    ]
+    if not fail_rows:
+        return []
+
+    severity_order = {
+        "CRITICAL": 0,
+        "HIGH": 1,
+        "MEDIUM": 2,
+        "LOW": 3,
+        "INFO": 4,
+        "UNKNOWN": 5,
+    }
+
+    grouped: Dict[str, Dict[str, Any]] = {}
+
+    for f in fail_rows:
+        check_id = (f.get("check_id") or "").strip()
+        title = (f.get("title") or "").strip()
+        key = f"{check_id}||{title}"
+
+        severity = (f.get("severity") or "UNKNOWN").upper()
+        sev_ord = severity_order.get(severity, severity_order["UNKNOWN"])
+
+        entry = grouped.get(key)
+        if entry is None:
+            grouped[key] = {
+                "check_id": check_id or "-",
+                "title": title or "-",
+                "severity": severity,
+                "severity_order": sev_ord,
+                "fail_count": 1,
+                "service": f.get("service") or "-",
+                "region": f.get("region") or "-",
+                "resource": f.get("resource") or "-",
+                "reason": (f.get("reason") or "").strip(),
+            }
+        else:
+            # FAIL 건수 누적
+            entry["fail_count"] += 1
+
+            # 더 높은(위험한) severity가 나오면 교체
+            if sev_ord < entry["severity_order"]:
+                entry["severity"] = severity
+                entry["severity_order"] = sev_ord
+
+            # reason이 비어있으면 새 row의 reason 사용
+            if not entry["reason"] and f.get("reason"):
+                entry["reason"] = (f.get("reason") or "").strip()
+
+            # 서비스/리전/리소스도 비어있을 때만 채워주기
+            if entry["service"] == "-" and f.get("service"):
+                entry["service"] = f.get("service")
+            if entry["region"] == "-" and f.get("region"):
+                entry["region"] = f.get("region")
+            if entry["resource"] == "-" and f.get("resource"):
+                entry["resource"] = f.get("resource")
+
+    items = list(grouped.values())
+
+    # 심각도 → FAIL 건수 → 체크 ID 순으로 정렬 후 상위 N개
+    items.sort(
+        key=lambda x: (
+            x["severity_order"],
+            -x["fail_count"],
+            x["check_id"],
+        )
+    )
+    return items[:max_items]
+
+
 # ──────────────────────────────────────────────
-# Prowler 상위 20건 표 렌더링
+# Prowler 상위 10건 표 렌더링
 # ──────────────────────────────────────────────
 def _draw_prowler_table(
     c: canvas.Canvas,
@@ -760,7 +1068,7 @@ def _draw_prowler_table(
     y: float,
 ) -> float:
     """
-    Prowler findings 상위 20건을 '세로 표' 형태로 출력.
+    Prowler findings 상위 10건을 '세로 표' 형태로 출력.
     - 각 취약점마다 작은 카드/표처럼:
       ┌──────────────────────────────┐
       │ No.1 [STATUS/SEV]           │
@@ -789,7 +1097,7 @@ def _draw_prowler_table(
     # 제목 설명 한 줄 정도 먼저
     y = _draw_paragraph(
         c,
-        "※ 아래 표는 Prowler 진단 결과 중 우선 확인이 필요한 상위 20개 항목을 세로 표 형태로 정리한 것입니다.",
+        "※ 아래 표는 Prowler 진단 결과 중 우선 확인이 필요한 상위 10개 항목을 세로 표 형태로 정리한 것입니다.",
         margin_x,
         y,
         max_chars=80,   # 페이지 폭 기준으로도 조금 줄이기
@@ -921,6 +1229,244 @@ def _draw_prowler_table(
     return y
 
 
+def _draw_scout_table(
+    c: canvas.Canvas,
+    findings: List[Dict[str, Any]],
+    margin_x: float,
+    y: float,
+) -> float:
+    """
+    Scout Suite Flagged 항목 상위 10건을 카드 형태로 출력.
+    """
+    if not findings:
+        return _draw_paragraph(
+            c,
+            "Scout Suite 리포트에서 Flagged 항목을 찾지 못했습니다.",
+            margin_x,
+            y,
+            70,
+            BODY_FONT,
+        )
+
+    width, _ = A4
+    box_left = margin_x
+    box_right = width - margin_x
+    box_width = box_right - box_left
+
+    y = _draw_paragraph(
+        c,
+        "※ 아래 표는 Scout Suite 리포트에서 위험도가 높은 순으로 Flagged 항목 상위 10개를 정리한 것입니다.",
+        margin_x,
+        y,
+        max_chars=80,
+        font_size=BODY_FONT,
+    )
+    y -= BODY_FONT + 15
+
+    INNER_MAX = 55
+
+    for idx_f, fitem in enumerate(findings[:10], start=1):
+        y = _ensure_page_space(c, y, 18, font_size=BODY_FONT)
+
+        sev = (fitem.get("severity") or "UNKNOWN").upper()
+        flagged = int(fitem.get("flagged_items") or 0)
+        fid = fitem.get("id") or "-"
+        service = fitem.get("service") or "-"
+        desc = fitem.get("description") or "-"
+        rationale = fitem.get("rationale") or ""
+        examples = fitem.get("examples") or []
+
+        box_top_y = y
+        inner_x = box_left + 4 * mm
+        label_x = inner_x
+        value_x = inner_x + 32 * mm
+        y -= 4
+        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
+        c.drawString(inner_x, y, f"No.{idx_f}  [{sev}] flagged={flagged}")
+        y -= BODY_FONT + 10
+
+        c.drawString(label_x, y, "서비스/체크:")
+        y = _draw_paragraph(
+            c,
+            f"{service} / {fid}",
+            value_x,
+            y,
+            max_chars=INNER_MAX,
+            font_size=BODY_FONT,
+        )
+        y -= 4
+
+        c.drawString(label_x, y, "설명:")
+        y = _draw_paragraph(
+            c,
+            desc,
+            value_x,
+            y,
+            max_chars=INNER_MAX,
+            font_size=BODY_FONT,
+        )
+        y -= 4
+
+        if rationale:
+            c.drawString(label_x, y, "근거:")
+            y = _draw_paragraph(
+                c,
+                rationale,
+                value_x,
+                y,
+                max_chars=INNER_MAX,
+                font_size=SMALL_FONT,
+            )
+            y -= 4
+
+        if examples:
+            c.drawString(label_x, y, "예시:")
+            y = _draw_paragraph(
+                c,
+                "; ".join(examples),
+                value_x,
+                y,
+                max_chars=INNER_MAX,
+                font_size=SMALL_FONT,
+            )
+            y -= 4
+
+        box_bottom_y = y + 4
+        c.setLineWidth(0.5)
+        c.rect(
+            box_left,
+            box_bottom_y,
+            box_width,
+            box_top_y - box_bottom_y + 8,
+        )
+
+        y = box_bottom_y - 10
+        if y < BOTTOM_MARGIN_MM * mm + 60:
+            y = _start_new_page(c)
+
+    return y
+
+
+def _draw_steampipe_table(
+    c: canvas.Canvas,
+    controls: List[Dict[str, Any]],
+    margin_x: float,
+    y: float,
+) -> float:
+    """
+    Steampipe Powerpipe benchmark 결과에서 alarm 많은 순 상위 10개 컨트롤을 카드 형태로 출력.
+    """
+    if not controls:
+        return _draw_paragraph(
+            c,
+            "Steampipe 리포트에서 alarm 상태의 컨트롤을 찾지 못했습니다.",
+            margin_x,
+            y,
+            70,
+            BODY_FONT,
+        )
+
+    width, _ = A4
+    box_left = margin_x
+    box_right = width - margin_x
+    box_width = box_right - box_left
+
+    y = _draw_paragraph(
+        c,
+        "※ 아래 표는 Steampipe(Powerpipe benchmark) 결과에서 alarm 개수가 많은 순으로 상위 10개 컨트롤을 정리한 것입니다.",
+        margin_x,
+        y,
+        max_chars=80,
+        font_size=BODY_FONT,
+    )
+    y -= BODY_FONT + 15
+
+    INNER_MAX = 55
+
+    for idx_c, ctrl in enumerate(controls[:10], start=1):
+        y = _ensure_page_space(c, y, 18, font_size=BODY_FONT)
+
+        sev = (ctrl.get("severity") or "UNKNOWN").upper()
+        alarm = int(ctrl.get("alarm") or 0)
+        ok = int(ctrl.get("ok") or 0)
+        info = int(ctrl.get("info") or 0)
+        skip = int(ctrl.get("skip") or 0)
+        cid = ctrl.get("id") or "-"
+        title = ctrl.get("title") or "-"
+        service = ctrl.get("service") or "-"
+        desc = ctrl.get("description") or "-"
+        examples = ctrl.get("examples") or []
+
+        box_top_y = y
+        inner_x = box_left + 4 * mm
+        label_x = inner_x
+        value_x = inner_x + 32 * mm
+        y -= 4
+        c.setFont(KOREAN_FONT_NAME, BODY_FONT)
+        c.drawString(inner_x, y, f"No.{idx_c}  [{sev}] alarm={alarm} ok={ok}")
+        y -= BODY_FONT + 10
+
+        c.drawString(label_x, y, "컨트롤:")
+        y = _draw_paragraph(
+            c,
+            f"{cid} – {title}",
+            value_x,
+            y,
+            max_chars=INNER_MAX,
+            font_size=BODY_FONT,
+        )
+        y -= 4
+
+        c.drawString(label_x, y, "서비스:")
+        y = _draw_paragraph(
+            c,
+            service,
+            value_x,
+            y,
+            max_chars=INNER_MAX,
+            font_size=BODY_FONT,
+        )
+        y -= 4
+
+        c.drawString(label_x, y, "설명:")
+        y = _draw_paragraph(
+            c,
+            desc,
+            value_x,
+            y,
+            max_chars=INNER_MAX,
+            font_size=BODY_FONT,
+        )
+        y -= 4
+
+        if examples:
+            c.drawString(label_x, y, "예시:")
+            y = _draw_paragraph(
+                c,
+                "; ".join(examples),
+                value_x,
+                y,
+                max_chars=INNER_MAX,
+                font_size=SMALL_FONT,
+            )
+            y -= 4
+
+        box_bottom_y = y + 4
+        c.setLineWidth(0.5)
+        c.rect(
+            box_left,
+            box_bottom_y,
+            box_width,
+            box_top_y - box_bottom_y + 8,
+        )
+
+        y = box_bottom_y - 10
+        if y < BOTTOM_MARGIN_MM * mm + 60:
+            y = _start_new_page(c)
+
+    return y
+
+
 
 
 
@@ -937,7 +1483,7 @@ def generate_evidence_pdf(
       1. 종합 요약
       2. 컴플라이언스 관점 요약
       3. 세부 취약점 항목(템플릿 설명)
-      4. Prowler 진단 결과 (상위 20건)  ← ★ 여기로 끌어올림 + 표
+      4. 주요 진단 결과 (Prowler/Scout 상위 10건 표)
       5. 도구별 실행 상세
       6. 부록 – 도구별 산출물 개요
     """
@@ -968,6 +1514,7 @@ def generate_evidence_pdf(
     prowler_stats = _analyze_prowler_from_meta(tool_meta.get("prowler"))
     steampipe_stats = _analyze_steampipe_from_meta(tool_meta.get("steampipe"))
     custodian_stats = _analyze_custodian_from_meta(tool_meta.get("custodian"))
+    scout_stats = _analyze_scout_from_meta(tool_meta.get("scout"))
 
     total_severity = _merge_severity_counts(prowler_stats.get("severity_counts", {}))
 
@@ -1099,45 +1646,125 @@ def generate_evidence_pdf(
     # ─────────────────────────────────────
     # 3. 세부 취약점 항목 (개념 설명)
     # ─────────────────────────────────────
-    y = _draw_heading(c, "3. 세부 취약점 항목", margin_x, y, level=1)
+    # ─────────────────────────────────────
+    # 3. 세부 취약점 항목 (개념 설명)
+    # ─────────────────────────────────────
+    # ─────────────────────────────────────
+    y = _draw_heading(c, "3. 세부 취약점 항목 (Prowler 기반 위협 설명)", margin_x, y, level=1)
 
-    for item in DETAILED_ITEMS:
-        title = f"3. 세부 취약점 항목 - {item['code']} {item['title']}"
-        y = _draw_heading(c, title, margin_x, y, level=2)
+    threat_items = _build_prowler_threat_items(prowler_stats, max_items=10)
 
-        y = _draw_paragraph(c, f"취약점 개요: {item['overview']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-        y = _draw_paragraph(c, f"점검 내용: {item['check']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-        y = _draw_paragraph(c, f"점검 목적: {item['purpose']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-        y = _draw_paragraph(c, f"보안 위협: {item['risk']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-        y = _draw_paragraph(c, f"점검 대상 도구: {item['tools']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-        y = _draw_paragraph(c, f"판단 기준(양호): {item['good']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-        y = _draw_paragraph(c, f"판단 기준(취약): {item['bad']}", margin_x, y, 80, BODY_FONT)
-        y -= 5
-
-        y = _draw_paragraph(c, "점검 및 조치 사례:", margin_x, y, 80, BODY_FONT)
-        for idx_step, step in enumerate(item["steps"], start=1):
-            y = _draw_paragraph(c, f"Step {idx_step}: {step}", margin_x + 6 * mm, y, 78, BODY_FONT)
-
+    if not threat_items:
+        y = _draw_paragraph(
+            c,
+            "현재 Prowler FAIL 결과에서 세부 위협 항목을 추출할 수 있는 데이터가 없습니다.",
+            margin_x,
+            y,
+            80,
+            BODY_FONT,
+        )
+    else:
+        intro = (
+            "본 장에서는 Prowler FAIL 결과를 기반으로, 실제 점검에서 발견된 주요 취약점 항목과 "
+            "각 항목에 대한 위협(위험 설명)을 정리하였다. 체크 ID/제목 단위로 FAIL 건수를 집계하고, "
+            "Prowler 리포트 상의 '위험 설명/사유(RISK/FAIL_REASON/NOTES 등)' 필드를 그대로 활용한다."
+        )
+        y = _draw_paragraph(c, intro, margin_x, y, 80, BODY_FONT)
         y -= 10
-        y = _ensure_page_space(c, y, 3, font_size=BODY_FONT)
+
+        for idx, t in enumerate(threat_items, start=1):
+            title = (
+                f"3-{idx}. [{t['severity']}] {t['check_id']} – {t['title']}"
+                if t.get("check_id")
+                else f"3-{idx}. [{t['severity']}] {t['title']}"
+            )
+            y = _draw_heading(c, title, margin_x, y, level=2)
+
+            # FAIL 건수
+            y = _draw_paragraph(
+                c,
+                f"· FAIL 발생 건수: {t['fail_count']}건",
+                margin_x,
+                y,
+                90,
+                BODY_FONT,
+            )
+
+            # 서비스/리전
+            service = t.get("service") or "-"
+            region = t.get("region") or "-"
+            y = _draw_paragraph(
+                c,
+                f"· 주요 서비스/리전: {service} / {region}",
+                margin_x,
+                y,
+                90,
+                BODY_FONT,
+            )
+
+            # 대표 리소스
+            resource = (t.get("resource") or "").strip()
+            if resource:
+                y = _draw_paragraph(
+                    c,
+                    f"· 대표 리소스 예시: {resource}",
+                    margin_x,
+                    y,
+                    90,
+                    BODY_FONT,
+                )
+
+            # ★ 여기서 “위협만 뽑아서” 사용
+            reason = (t.get("reason") or "").strip()
+            if reason:
+                y = _draw_paragraph(
+                    c,
+                    f"· Prowler 위협/위험 설명: {reason}",
+                    margin_x,
+                    y,
+                    90,
+                    BODY_FONT,
+                )
+            else:
+                y = _draw_paragraph(
+                    c,
+                    "· Prowler 위협/위험 설명: (리포트에 별도 설명 텍스트 없음)",
+                    margin_x,
+                    y,
+                    90,
+                    BODY_FONT,
+                )
+
+            y -= 8
+            y = _ensure_page_space(c, y, 4, font_size=BODY_FONT)
+
 
 
 
 
 
     # ─────────────────────────────────────
-    # 4. Prowler 진단 결과 (상위 20건) ← ★ 표
+    # 4. 주요 진단 결과 (상위 10건)
     # ─────────────────────────────────────
     y -= 10
-    y = _draw_heading(c, "4. Prowler 진단 결과 (상위 10건)", margin_x, y, level=1)
+    y = _draw_heading(c, "4. 주요 진단 결과 (상위 10건)", margin_x, y, level=1)
+
+    # 4-1. Prowler
+    y = _draw_heading(c, "4-1. Prowler (상위 10건)", margin_x, y, level=2)
     findings = prowler_stats.get("findings") or []
     y = _draw_prowler_table(c, findings, margin_x, y)
+
+    # 4-2. Scout Suite
+    y -= 6
+    y = _ensure_page_space(c, y, 4, font_size=BODY_FONT)
+    y = _draw_heading(c, "4-2. Scout Suite (상위 10건)", margin_x, y, level=2)
+    y = _draw_scout_table(c, scout_stats.get("findings") or [], margin_x, y)
+
+    # 4-3. Steampipe
+    y -= 6
+    y = _ensure_page_space(c, y, 4, font_size=BODY_FONT)
+    y = _draw_heading(c, "4-3. Steampipe (상위 10건)", margin_x, y, level=2)
+    y = _draw_steampipe_table(c, steampipe_stats.get("controls") or [], margin_x, y)
 
     y = _start_new_page(c)
 
@@ -1388,6 +2015,11 @@ def generate_evidence_pdf(
         "custodian": {
             "total_findings": custodian_stats.get("total_findings", 0),
             "policies": custodian_stats.get("policies", []),
+        },
+        "scout": {
+            "total_flagged": scout_stats.get("total_flagged", 0),
+            "severity_counts": scout_stats.get("severity_counts", {}),
+            "summary": scout_stats.get("summary", {}),
         },
     }
     try:
