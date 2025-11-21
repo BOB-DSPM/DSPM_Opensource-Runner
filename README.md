@@ -4,12 +4,33 @@
 
 이 프로젝트는 **보안 스캐닝 오픈소스 도구들을 웹 인터페이스로 실행하고 모니터링할 수 있는 백엔드 서비스**입니다.
 
-### 주요 목적
-- Prowler, Trivy, Syft 등의 보안 검사 도구를 웹에서 실행
-- 실행 중인 프로세스의 로그를 실시간으로 스트리밍
-- 여러 실행 작업을 동시에 관리
+---
 
-### 지원하는 보안 오픈소스 도구
+## 🚀 주요 기능
+
+### 보안 스캐닝 자동화
+- **웹 기반 실행**: 복잡한 CLI 명령어 없이 웹 인터페이스로 보안 도구 실행
+- **실시간 모니터링**: Server-Sent Events(SSE)를 통한 실시간 로그 스트리밍
+- **동시 작업 관리**: 여러 보안 스캔을 동시에 실행하고 추적
+- **자동 증적 생성**: 감사를 위한 125개 이상의 증적 파일 자동 생성
+
+### 지원하는 보안 프레임워크
+- **CIS AWS Foundations Benchmark** (v2.0, v3.0, v4.0)
+- **PCI-DSS** (Payment Card Industry Data Security Standard)
+- **ISO 27001** (국제 정보보안 관리체계 표준)
+- **CISA** (Cybersecurity and Infrastructure Security Agency)
+- **RBI Cyber Security Framework** (Reserve Bank of India)
+- **AWS Well-Architected Framework**
+
+### 컴플라이언스 자동화
+- 주기적인 보안 점검 실행 (일/주/월 단위)
+- 취약점 발견 시 자동 알림
+- 종합 보안 평가 리포트 PDF 자동 생성
+- 컴플라이언스 대시보드 구축
+
+---
+
+## 지원하는 보안 오픈소스 도구
 
 #### 1. Prowler
 - **목적**: AWS 계정 및 서비스 보안 점검
@@ -366,37 +387,19 @@ eventSource.onerror = () => {
 
 ## AWS Marketplace 보안/자격 증명 대응
 
-이 시스템에서 실행하는 오픈소스 도구들은 AWS의 보안 및 컴플라이언스 요구사항을 충족하는 데 활용될 수 있습니다.
+이 프로젝트는 AWS Marketplace 컨테이너 제품 요구 사항(보안, 고객 데이터, 자격 증명 정책 등)에 맞춰 다음을 준수합니다.
 
-### 지원하는 보안 프레임워크
-- **CIS AWS Foundations Benchmark** (v2.0, v3.0, v4.0)
-- **PCI-DSS** (Payment Card Industry Data Security Standard)
-- **ISO 27001** (국제 정보보안 관리체계 표준)
-- **CISA** (Cybersecurity and Infrastructure Security Agency)
-- **RBI Cyber Security Framework** (Reserve Bank of India)
-- **AWS Well-Architected Framework**
-
-### 컴플라이언스 자동화
-본 시스템을 활용하여 다음과 같은 컴플라이언스 작업을 자동화할 수 있습니다:
-- 주기적인 보안 점검 실행 (일/주/월 단위)
-- 취약점 발견 시 자동 알림
-- 감사를 위한 증적 자료 자동 생성
-- 컴플라이언스 대시보드 구축
-
-### AWS Marketplace 통합 시나리오
-```
-AWS 환경
-    ↓
-본 시스템 (오픈소스 러너)
-    ↓
-자동 보안 점검 실행
-    ↓
-결과 저장 (S3/RDS)
-    ↓
-컴플라이언스 리포트 생성
-```
+- **IAM 전용 자격 증명**: 컨테이너는 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` 입력을 요구하지 않습니다. 실행 시 Pod Identity(EKS IRSA) 또는 ECS/Fargate Task Role에 부여된 권한으로만 AWS API를 호출합니다. 교차 계정이 필요한 경우 `iam_role_arn` 옵션으로 STS AssumeRole을 수행합니다.
+- **최소 권한**: 컨테이너 실행 계정은 Dockerfile에서 생성한 `dspm` 비루트 사용자이며, 루트 권한 없이 FastAPI/CLI를 구동합니다.
+- **자동화된 배포**: 이미지 안에 모든 실행 바이너리(prowler, custodian, scout, powerpipe 등)를 포함/설치하며 외부에서 추가 이미지를 가져오지 않습니다.
+- **보안 비밀 미저장**: API 페이로드에는 IAM External ID 등 민감 값이 보관되지 않고, 실행 디렉터리(`runs/.../result.json`)에도 마스킹된 값만 남습니다.
+AWS Marketplace/EKS에 배포할 때는 서비스 계정에 다음 권한을 부여해야 합니다.
+1. Steampipe/Prowler/Scout/Custodian가 대상 계정에서 점검할 IAM 정책.
+2. 교차 계정 점검 시 `sts:AssumeRole` 로 목표 `iam_role_arn`을 수임할 권한.
+3. (선택) `iam_session_duration` 범위(기본 1시간)에 맞는 STS 정책.
 
 ---
+
 
 ## 참고
 
