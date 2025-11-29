@@ -135,6 +135,30 @@ def _safe_run_dir(base_dir: str = "./runs") -> str:
     return path
 
 
+def _ensure_powerpipe_service(bin_path: str) -> None:
+    """
+    Ensure the Powerpipe service (Steampipe backend) is running so benchmark
+    commands do not fail with connection refused on port 9193.
+    """
+    try:
+        status = subprocess.run(
+            [bin_path, "service", "status"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if status.returncode != 0:
+            subprocess.run(
+                [bin_path, "service", "start", "--background"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+    except Exception:
+        # Best-effort; failures will surface during benchmark run.
+        pass
+
+
 def _sanitize_subdir(root: str, subdir: Optional[str]) -> str:
     if not subdir:
         return root
@@ -1556,6 +1580,10 @@ def run_tool(code: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             or "github.com/turbot/steampipe-mod-aws-compliance"
         )
         try:
+            _ensure_powerpipe_service(bin_name)
+        except Exception:
+            pass
+        try:
             subprocess.run(
                 ["powerpipe", "mod", "init"],
                 cwd=base_run_dir,
@@ -1801,6 +1829,20 @@ async def iter_run_stream(code: str, payload: Dict[str, Any]):
     )
     async for chunk in _aiter_stream_popen(ver_cmd, env=env, timeout=60):
         yield chunk
+    if code == "steampipe":
+        yield b"\n===== [STEP] ensure service (powerpipe) =====\n"
+        cmd_status = [resolved, "service", "status"]
+        yield (f"$ {' '.join(shlex.quote(x) for x in cmd_status)}\n").encode()
+        async for chunk in _aiter_stream_popen(
+            cmd_status, env=env, timeout=60
+        ):
+            yield chunk
+        cmd_start = [resolved, "service", "start", "--background"]
+        yield (f"$ {' '.join(shlex.quote(x) for x in cmd_start)}\n").encode()
+        async for chunk in _aiter_stream_popen(
+            cmd_start, env=env, timeout=120
+        ):
+            yield chunk
 
     # Steampipe는 Powerpipe mod init/install
     if code == "steampipe":
